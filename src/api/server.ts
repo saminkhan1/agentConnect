@@ -1,5 +1,9 @@
-import Fastify from 'fastify';
 import crypto from 'node:crypto';
+
+import Fastify from 'fastify';
+import { serializerCompiler, validatorCompiler, ZodTypeProvider } from "fastify-type-provider-zod";
+
+import dbPlugin from '../plugins/db';
 
 export async function buildServer() {
     const server = Fastify({
@@ -13,7 +17,13 @@ export async function buildServer() {
         genReqId: () => {
             return crypto.randomUUID();
         },
-    });
+    }).withTypeProvider<ZodTypeProvider>();
+
+    server.setValidatorCompiler(validatorCompiler);
+    server.setSerializerCompiler(serializerCompiler);
+
+    // Register DB plugin early
+    await server.register(dbPlugin);
 
     // Attach the request id to the response headers
     server.addHook('onSend', async (request, reply, _payload) => {

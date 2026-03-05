@@ -1,40 +1,54 @@
-import test from 'node:test';
 import assert from 'node:assert';
+import test from 'node:test';
+import { z } from 'zod';
+
 import { buildServer } from '../src/api/server';
 
-test('health endpoint returns ok', async (t) => {
-    const server = await buildServer();
+const healthResponseSchema = z.object({
+  status: z.literal('ok'),
+  timestamp: z.iso.datetime(),
+});
 
+void test('health endpoint returns ok', async () => {
+  const server = await buildServer();
+  try {
     const response = await server.inject({
-        method: 'GET',
-        url: '/health',
+      method: 'GET',
+      url: '/health',
     });
 
     assert.strictEqual(response.statusCode, 200);
-    const payload = JSON.parse(response.payload);
+    const rawPayload: unknown = JSON.parse(response.payload);
+    const payload = healthResponseSchema.parse(rawPayload);
     assert.strictEqual(payload.status, 'ok');
     assert.ok(payload.timestamp);
+  } finally {
+    await server.close();
+  }
 });
 
-test('subsequent requests include x-correlation-id', async (t) => {
-    const server = await buildServer();
-
+void test('subsequent requests include x-correlation-id', async () => {
+  const server = await buildServer();
+  try {
     const response1 = await server.inject({
-        method: 'GET',
-        url: '/health',
+      method: 'GET',
+      url: '/health',
     });
 
     const correlationId1 = response1.headers['x-correlation-id'];
     assert.ok(correlationId1);
 
     const response2 = await server.inject({
-        method: 'GET',
-        url: '/health',
-        headers: {
-            'x-correlation-id': 'my-custom-id',
-        },
+      method: 'GET',
+      url: '/health',
+      headers: {
+        'x-correlation-id': 'my-custom-id',
+      },
     });
 
     const correlationId2 = response2.headers['x-correlation-id'];
     assert.strictEqual(correlationId2, 'my-custom-id');
+  } finally {
+    await server.close();
+  }
 });
