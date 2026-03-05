@@ -47,7 +47,7 @@ function buildAgentRecord(overrides?: Partial<AgentRecord>): AgentRecord {
   };
 }
 
-function installAuthApiKey(
+async function installAuthApiKey(
   server: Awaited<ReturnType<typeof buildServer>>,
   options?: {
     orgId?: string;
@@ -55,7 +55,7 @@ function installAuthApiKey(
     isRevoked?: boolean;
   },
 ) {
-  const keyMaterial = generateApiKeyMaterial();
+  const keyMaterial = await generateApiKeyMaterial();
   const originalGetApiKeyById = server.systemDal.getApiKeyById.bind(server.systemDal);
 
   server.systemDal.getApiKeyById = (_id) =>
@@ -103,7 +103,7 @@ function installAgentsDalMock(methods: {
 
 void test('GET /agents returns 401 when API key is revoked', async () => {
   const server = await buildServer();
-  const { authorizationHeader, restore } = installAuthApiKey(server, {
+  const { authorizationHeader, restore } = await installAuthApiKey(server, {
     isRevoked: true,
   });
 
@@ -128,7 +128,7 @@ void test('GET /agents returns 401 when API key is revoked', async () => {
 
 void test('POST /agents creates an agent with agt_ id prefix', async () => {
   const server = await buildServer();
-  const { authorizationHeader, restore } = installAuthApiKey(server);
+  const { authorizationHeader, restore } = await installAuthApiKey(server);
 
   const capturedInserts: Array<{ id: string; name: string }> = [];
   const restoreAgentsDal = installAgentsDalMock({
@@ -179,7 +179,7 @@ void test('POST /agents creates an agent with agt_ id prefix', async () => {
 
 void test('GET /agents excludes archived by default and includes with includeArchived=true', async () => {
   const server = await buildServer();
-  const { authorizationHeader, restore } = installAuthApiKey(server);
+  const { authorizationHeader, restore } = await installAuthApiKey(server);
 
   const capturedOptions: Array<{ includeArchived?: boolean } | undefined> = [];
   const activeAgent = buildAgentRecord({ id: 'agt_active', isArchived: false });
@@ -237,7 +237,7 @@ void test('GET /agents excludes archived by default and includes with includeArc
 
 void test('GET /agents/:id returns archived agents', async () => {
   const server = await buildServer();
-  const { authorizationHeader, restore } = installAuthApiKey(server);
+  const { authorizationHeader, restore } = await installAuthApiKey(server);
   const archivedAgent = buildAgentRecord({
     id: 'agt_archived',
     isArchived: true,
@@ -269,7 +269,7 @@ void test('GET /agents/:id returns archived agents', async () => {
 
 void test('GET /agents/:id returns 404 for a cross-org lookup', async () => {
   const server = await buildServer();
-  const { authorizationHeader, restore } = installAuthApiKey(server, { orgId: 'org_123' });
+  const { authorizationHeader, restore } = await installAuthApiKey(server, { orgId: 'org_123' });
   const restoreAgentsDal = installAgentsDalMock({
     findById: (_id) => Promise.resolve(null),
   });
@@ -296,7 +296,7 @@ void test('GET /agents/:id returns 404 for a cross-org lookup', async () => {
 
 void test('PATCH /agents/:id updates name and isArchived', async () => {
   const server = await buildServer();
-  const { authorizationHeader, restore } = installAuthApiKey(server);
+  const { authorizationHeader, restore } = await installAuthApiKey(server);
   const capturedUpdates: Array<{
     id: string;
     data: Partial<Pick<AgentRecord, 'name' | 'isArchived'>>;
@@ -351,7 +351,7 @@ void test('PATCH /agents/:id updates name and isArchived', async () => {
 
 void test('PATCH /agents/:id returns 400 when body is empty', async () => {
   const server = await buildServer();
-  const { authorizationHeader, restore } = installAuthApiKey(server);
+  const { authorizationHeader, restore } = await installAuthApiKey(server);
   const restoreAgentsDal = installAgentsDalMock({
     updateById: (_id, _data) => Promise.resolve(null),
   });
@@ -376,7 +376,7 @@ void test('PATCH /agents/:id returns 400 when body is empty', async () => {
 
 void test('DELETE /agents/:id soft-archives and returns wrapped agent', async () => {
   const server = await buildServer();
-  const { authorizationHeader, restore } = installAuthApiKey(server);
+  const { authorizationHeader, restore } = await installAuthApiKey(server);
   const restoreAgentsDal = installAgentsDalMock({
     archiveById: (id) =>
       Promise.resolve(

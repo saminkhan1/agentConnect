@@ -1,11 +1,28 @@
 import 'dotenv/config';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
+import fs from 'fs';
 import path from 'path';
 import { Pool } from 'pg';
 
 const databaseUrl =
   process.env.DATABASE_URL ?? 'postgres://postgres:password@localhost:5432/agentconnect_dev';
+
+function resolveMigrationsFolder() {
+  const candidates = [
+    path.join(__dirname, 'migrations'),
+    path.resolve(__dirname, '../../src/db/migrations'),
+    path.resolve(process.cwd(), 'src/db/migrations'),
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(path.join(candidate, 'meta', '_journal.json'))) {
+      return candidate;
+    }
+  }
+
+  throw new Error(`Unable to locate migrations folder from ${__dirname}`);
+}
 
 async function main() {
   console.log('Running migrations...');
@@ -16,9 +33,7 @@ async function main() {
 
   const db = drizzle(pool);
 
-  // This will run migrations on the database
-  // Skipping fetching schema path if compiled
-  const migrationsFolder = path.join(__dirname, 'migrations');
+  const migrationsFolder = resolveMigrationsFolder();
 
   try {
     await migrate(db, { migrationsFolder });

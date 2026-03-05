@@ -5,7 +5,7 @@ export const apiKeyTypeEnum = pgEnum('api_key_type', ['root', 'service']);
 export const orgs = pgTable('orgs', {
   id: varchar('id', { length: 255 }).primaryKey(),
   name: text('name').notNull(),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 });
 
 export const apiKeys = pgTable('api_keys', {
@@ -16,7 +16,7 @@ export const apiKeys = pgTable('api_keys', {
   keyType: apiKeyTypeEnum('key_type').notNull(),
   keyHash: text('key_hash').notNull(),
   isRevoked: boolean('is_revoked').default(false).notNull(),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 });
 
 export const agents = pgTable('agents', {
@@ -26,5 +26,5 @@ export const agents = pgTable('agents', {
     .notNull(),
   name: text('name').notNull(),
   isArchived: boolean('is_archived').default(false).notNull(),
-  createdAt: timestamp('created_at').defaultNow().notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 });

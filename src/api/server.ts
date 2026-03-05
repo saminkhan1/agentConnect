@@ -80,7 +80,7 @@ export async function buildServer() {
     },
     async (request, reply) => {
       const orgId = `org_${crypto.randomUUID()}`;
-      const rootKey = generateApiKeyMaterial();
+      const rootKey = await generateApiKeyMaterial();
 
       const result = await server.systemDal.createOrgWithApiKey({
         org: {
@@ -145,7 +145,7 @@ export async function buildServer() {
         });
       }
 
-      const serviceKey = generateApiKeyMaterial();
+      const serviceKey = await generateApiKeyMaterial();
       const createdKey = await request.dalFactory(org.id).apiKeys.insert({
         id: serviceKey.id,
         keyType: 'service',

@@ -220,7 +220,7 @@ void test('POST /orgs/:id/api-keys returns 401 when key id is unknown', async ()
 
 void test('POST /orgs/:id/api-keys returns 401 when key secret is invalid', async () => {
   const server = await buildServer();
-  const knownRootKey = generateApiKeyMaterial();
+  const knownRootKey = await generateApiKeyMaterial();
   const originalGetApiKeyById = server.systemDal.getApiKeyById.bind(server.systemDal);
   server.systemDal.getApiKeyById = (_id) =>
     Promise.resolve({
@@ -253,7 +253,7 @@ void test('POST /orgs/:id/api-keys returns 401 when key secret is invalid', asyn
 
 void test('POST /orgs/:id/api-keys returns 403 when scope is missing', async () => {
   const server = await buildServer();
-  const serviceKey = generateApiKeyMaterial();
+  const serviceKey = await generateApiKeyMaterial();
   const originalGetApiKeyById = server.systemDal.getApiKeyById.bind(server.systemDal);
   server.systemDal.getApiKeyById = (_id) =>
     Promise.resolve({
@@ -286,7 +286,7 @@ void test('POST /orgs/:id/api-keys returns 403 when scope is missing', async () 
 
 void test('POST /orgs/:id/api-keys creates a service key for a matching root key org', async () => {
   const server = await buildServer();
-  const rootKey = generateApiKeyMaterial();
+  const rootKey = await generateApiKeyMaterial();
   const originalGetApiKeyById = server.systemDal.getApiKeyById.bind(server.systemDal);
   server.systemDal.getApiKeyById = (_id) =>
     Promise.resolve({
@@ -368,7 +368,7 @@ void test('POST /orgs/:id/api-keys creates a service key for a matching root key
 
 void test('POST /orgs/:id/api-keys returns 403 when auth org does not match route org', async () => {
   const server = await buildServer();
-  const rootKey = generateApiKeyMaterial();
+  const rootKey = await generateApiKeyMaterial();
   const originalGetApiKeyById = server.systemDal.getApiKeyById.bind(server.systemDal);
   server.systemDal.getApiKeyById = (_id) =>
     Promise.resolve({

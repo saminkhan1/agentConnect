@@ -1,10 +1,10 @@
 import type { FastifyPluginCallback } from 'fastify';
 import fp from 'fastify-plugin';
 
-import { pool } from '../db';
+import { closeDbPool, ensureDbIsReady } from '../db';
 import { DalFactory, systemDal } from '../db/dal';
 
-let isPoolClosed = false;
+let activeServerCount = 0;
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -17,6 +17,9 @@ declare module 'fastify' {
 }
 
 const dbPlugin: FastifyPluginCallback = (server, _opts, done) => {
+  ensureDbIsReady();
+  activeServerCount += 1;
+
   // Keep write/read access to org-scoped data behind DAL instances.
   server.decorate('systemDal', systemDal);
 
@@ -26,12 +29,11 @@ const dbPlugin: FastifyPluginCallback = (server, _opts, done) => {
   });
 
   server.addHook('onClose', async () => {
-    if (isPoolClosed) {
-      return;
+    activeServerCount = Math.max(0, activeServerCount - 1);
+    if (activeServerCount === 0) {
+      // Close pool when the last Fastify instance in this process is closed.
+      await closeDbPool();
     }
-    // Close the postgres pool when the app is tearing down
-    await pool.end();
-    isPoolClosed = true;
   });
 
   done();

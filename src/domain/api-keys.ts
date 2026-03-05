@@ -28,9 +28,9 @@ function generateApiKeyId(): string {
   return `${API_KEY_ID_PREFIX}_${crypto.randomUUID()}`;
 }
 
-function hashApiKeySecret(secret: string): string {
+async function hashApiKeySecret(secret: string): Promise<string> {
   const salt = crypto.randomBytes(16).toString('hex');
-  const key = crypto.scryptSync(secret, salt, HASH_KEY_LENGTH).toString('hex');
+  const key = (await deriveKey(secret, salt)).toString('hex');
   return `${HASH_ALGORITHM}$${salt}$${key}`;
 }
 
@@ -77,10 +77,10 @@ function parseHashParts(storedHash: string): { salt: string; keyHex: string } | 
   return { salt, keyHex };
 }
 
-export function generateApiKeyMaterial(): GeneratedApiKey {
+export async function generateApiKeyMaterial(): Promise<GeneratedApiKey> {
   const id = generateApiKeyId();
   const secret = crypto.randomBytes(32).toString('base64url');
-  const keyHash = hashApiKeySecret(secret);
+  const keyHash = await hashApiKeySecret(secret);
 
   return {
     id,

@@ -20,8 +20,8 @@ void test('integration: agent CRUD uses real DB and enforces org isolation', asy
 
   const primaryOrgId = `org_int_${crypto.randomUUID()}`;
   const secondaryOrgId = `org_int_${crypto.randomUUID()}`;
-  const primaryRootKey = generateApiKeyMaterial();
-  const secondaryRootKey = generateApiKeyMaterial();
+  const primaryRootKey = await generateApiKeyMaterial();
+  const secondaryRootKey = await generateApiKeyMaterial();
 
   const primaryAuthorization = `Bearer ${primaryRootKey.plaintextKey}`;
   const secondaryAuthorization = `Bearer ${secondaryRootKey.plaintextKey}`;

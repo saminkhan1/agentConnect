@@ -20,8 +20,8 @@ void test('integration: auth + agent e2e covers valid/invalid/revoked keys and c
 
   const primaryOrgId = `org_auth_${crypto.randomUUID()}`;
   const secondaryOrgId = `org_auth_${crypto.randomUUID()}`;
-  const primaryRootKey = generateApiKeyMaterial();
-  const secondaryRootKey = generateApiKeyMaterial();
+  const primaryRootKey = await generateApiKeyMaterial();
+  const secondaryRootKey = await generateApiKeyMaterial();
 
   const primaryAuthorization = `Bearer ${primaryRootKey.plaintextKey}`;
   const secondaryAuthorization = `Bearer ${secondaryRootKey.plaintextKey}`;
