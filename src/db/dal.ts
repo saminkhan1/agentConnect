@@ -146,4 +146,8 @@ export const systemDal = {
     const result = await db.select().from(orgs).where(eq(orgs.id, id)).limit(1);
     return result[0] || null;
   },
+  async getApiKeyById(id: string): Promise<ApiKeyRecord | null> {
+    const result = await db.select().from(apiKeys).where(eq(apiKeys.id, id)).limit(1);
+    return result[0] || null;
+  },
 };

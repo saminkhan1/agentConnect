@@ -4,6 +4,7 @@ import { z } from 'zod';
 
 import { buildServer } from '../src/api/server';
 import { DalFactory } from '../src/db/dal';
+import { generateApiKeyMaterial } from '../src/domain/api-keys';
 
 const healthResponseSchema = z.object({
   status: z.literal('ok'),
@@ -51,6 +52,10 @@ const capturedServiceInsertSchema = z.object({
   id: z.string(),
   keyType: z.literal('service'),
   keyHash: z.string(),
+});
+
+const errorResponseSchema = z.object({
+  message: z.string(),
 });
 
 void test('health endpoint returns ok', async () => {
@@ -151,29 +156,144 @@ void test('POST /orgs creates an org and returns a root key once', async () => {
   }
 });
 
-void test('POST /orgs/:id/api-keys returns 404 when org does not exist', async () => {
+void test('POST /orgs/:id/api-keys returns 401 when auth header is missing', async () => {
   const server = await buildServer();
-  const originalGetOrg = server.systemDal.getOrg.bind(server.systemDal);
-  server.systemDal.getOrg = (_id) => Promise.resolve(null);
-
   try {
     const response = await server.inject({
       method: 'POST',
-      url: '/orgs/org_missing/api-keys',
+      url: '/orgs/org_123/api-keys',
     });
 
-    assert.strictEqual(response.statusCode, 404);
+    assert.strictEqual(response.statusCode, 401);
     const rawPayload: unknown = JSON.parse(response.payload);
-    const payload = z.object({ message: z.string() }).parse(rawPayload);
-    assert.strictEqual(payload.message, 'Organization not found');
+    const payload = errorResponseSchema.parse(rawPayload);
+    assert.strictEqual(payload.message, 'Unauthorized');
   } finally {
-    server.systemDal.getOrg = originalGetOrg;
     await server.close();
   }
 });
 
-void test('POST /orgs/:id/api-keys creates a service key for an existing org', async () => {
+void test('POST /orgs/:id/api-keys returns 401 when auth header is malformed', async () => {
   const server = await buildServer();
+  try {
+    const response = await server.inject({
+      method: 'POST',
+      url: '/orgs/org_123/api-keys',
+      headers: {
+        authorization: 'Bearer malformed-key',
+      },
+    });
+
+    assert.strictEqual(response.statusCode, 401);
+    const rawPayload: unknown = JSON.parse(response.payload);
+    const payload = errorResponseSchema.parse(rawPayload);
+    assert.strictEqual(payload.message, 'Unauthorized');
+  } finally {
+    await server.close();
+  }
+});
+
+void test('POST /orgs/:id/api-keys returns 401 when key id is unknown', async () => {
+  const server = await buildServer();
+  const originalGetApiKeyById = server.systemDal.getApiKeyById.bind(server.systemDal);
+  server.systemDal.getApiKeyById = (_id) => Promise.resolve(null);
+
+  try {
+    const response = await server.inject({
+      method: 'POST',
+      url: '/orgs/org_123/api-keys',
+      headers: {
+        authorization: 'Bearer sk_key_missing.secret',
+      },
+    });
+
+    assert.strictEqual(response.statusCode, 401);
+    const rawPayload: unknown = JSON.parse(response.payload);
+    const payload = errorResponseSchema.parse(rawPayload);
+    assert.strictEqual(payload.message, 'Unauthorized');
+  } finally {
+    server.systemDal.getApiKeyById = originalGetApiKeyById;
+    await server.close();
+  }
+});
+
+void test('POST /orgs/:id/api-keys returns 401 when key secret is invalid', async () => {
+  const server = await buildServer();
+  const knownRootKey = generateApiKeyMaterial();
+  const originalGetApiKeyById = server.systemDal.getApiKeyById.bind(server.systemDal);
+  server.systemDal.getApiKeyById = (_id) =>
+    Promise.resolve({
+      id: knownRootKey.id,
+      orgId: 'org_123',
+      keyType: 'root',
+      keyHash: knownRootKey.keyHash,
+      createdAt: new Date('2026-03-01T00:00:00.000Z'),
+    });
+
+  try {
+    const response = await server.inject({
+      method: 'POST',
+      url: '/orgs/org_123/api-keys',
+      headers: {
+        authorization: `Bearer sk_${knownRootKey.id}.wrong-secret`,
+      },
+    });
+
+    assert.strictEqual(response.statusCode, 401);
+    const rawPayload: unknown = JSON.parse(response.payload);
+    const payload = errorResponseSchema.parse(rawPayload);
+    assert.strictEqual(payload.message, 'Unauthorized');
+  } finally {
+    server.systemDal.getApiKeyById = originalGetApiKeyById;
+    await server.close();
+  }
+});
+
+void test('POST /orgs/:id/api-keys returns 403 when scope is missing', async () => {
+  const server = await buildServer();
+  const serviceKey = generateApiKeyMaterial();
+  const originalGetApiKeyById = server.systemDal.getApiKeyById.bind(server.systemDal);
+  server.systemDal.getApiKeyById = (_id) =>
+    Promise.resolve({
+      id: serviceKey.id,
+      orgId: 'org_123',
+      keyType: 'service',
+      keyHash: serviceKey.keyHash,
+      createdAt: new Date('2026-03-01T00:00:00.000Z'),
+    });
+
+  try {
+    const response = await server.inject({
+      method: 'POST',
+      url: '/orgs/org_123/api-keys',
+      headers: {
+        authorization: `Bearer ${serviceKey.plaintextKey}`,
+      },
+    });
+
+    assert.strictEqual(response.statusCode, 403);
+    const rawPayload: unknown = JSON.parse(response.payload);
+    const payload = errorResponseSchema.parse(rawPayload);
+    assert.strictEqual(payload.message, 'Forbidden');
+  } finally {
+    server.systemDal.getApiKeyById = originalGetApiKeyById;
+    await server.close();
+  }
+});
+
+void test('POST /orgs/:id/api-keys creates a service key for a matching root key org', async () => {
+  const server = await buildServer();
+  const rootKey = generateApiKeyMaterial();
+  const originalGetApiKeyById = server.systemDal.getApiKeyById.bind(server.systemDal);
+  server.systemDal.getApiKeyById = (_id) =>
+    Promise.resolve({
+      id: rootKey.id,
+      orgId: 'org_123',
+      keyType: 'root',
+      keyHash: rootKey.keyHash,
+      createdAt: new Date('2026-03-01T00:00:00.000Z'),
+    });
+
   const originalGetOrg = server.systemDal.getOrg.bind(server.systemDal);
   let lookedUpOrgId: string | undefined;
   server.systemDal.getOrg = (id) => {
@@ -213,6 +333,9 @@ void test('POST /orgs/:id/api-keys creates a service key for an existing org', a
     const response = await server.inject({
       method: 'POST',
       url: '/orgs/org_123/api-keys',
+      headers: {
+        authorization: `bearer ${rootKey.plaintextKey}`,
+      },
     });
 
     assert.strictEqual(response.statusCode, 201);
@@ -230,10 +353,76 @@ void test('POST /orgs/:id/api-keys creates a service key for an existing org', a
     assert.match(capturedInsert.keyHash, /^scrypt\$/);
     assert.notStrictEqual(capturedInsert.keyHash, payload.apiKey.key);
   } finally {
+    server.systemDal.getApiKeyById = originalGetApiKeyById;
     server.systemDal.getOrg = originalGetOrg;
     if (originalApiKeysDescriptor) {
       Object.defineProperty(DalFactory.prototype, 'apiKeys', originalApiKeysDescriptor);
     }
+    await server.close();
+  }
+});
+
+void test('POST /orgs/:id/api-keys returns 403 when auth org does not match route org', async () => {
+  const server = await buildServer();
+  const rootKey = generateApiKeyMaterial();
+  const originalGetApiKeyById = server.systemDal.getApiKeyById.bind(server.systemDal);
+  server.systemDal.getApiKeyById = (_id) =>
+    Promise.resolve({
+      id: rootKey.id,
+      orgId: 'org_123',
+      keyType: 'root',
+      keyHash: rootKey.keyHash,
+      createdAt: new Date('2026-03-01T00:00:00.000Z'),
+    });
+
+  const originalGetOrg = server.systemDal.getOrg.bind(server.systemDal);
+  let lookedUpOrgId: string | undefined;
+  server.systemDal.getOrg = (id) => {
+    lookedUpOrgId = id;
+    return Promise.resolve({
+      id,
+      name: 'Acme AI',
+      createdAt: new Date('2026-03-01T00:00:00.000Z'),
+    });
+  };
+
+  try {
+    const response = await server.inject({
+      method: 'POST',
+      url: '/orgs/org_999/api-keys',
+      headers: {
+        authorization: `Bearer ${rootKey.plaintextKey}`,
+      },
+    });
+
+    assert.strictEqual(response.statusCode, 403);
+    const rawPayload: unknown = JSON.parse(response.payload);
+    const payload = errorResponseSchema.parse(rawPayload);
+    assert.strictEqual(payload.message, 'Forbidden');
+    assert.strictEqual(lookedUpOrgId, undefined);
+  } finally {
+    server.systemDal.getApiKeyById = originalGetApiKeyById;
+    server.systemDal.getOrg = originalGetOrg;
+    await server.close();
+  }
+});
+
+void test('public routes fail closed when malformed authorization header is present', async () => {
+  const server = await buildServer();
+  try {
+    const response = await server.inject({
+      method: 'GET',
+      url: '/health',
+      headers: {
+        authorization: 'Basic abc123',
+      },
+    });
+
+    assert.strictEqual(response.statusCode, 401);
+    const rawPayload: unknown = JSON.parse(response.payload);
+    const payload = errorResponseSchema.parse(rawPayload);
+    assert.strictEqual(payload.message, 'Unauthorized');
+  } finally {
     await server.close();
   }
 });

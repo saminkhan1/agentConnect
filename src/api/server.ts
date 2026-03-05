@@ -11,6 +11,7 @@ import {
   errorResponseSchema,
 } from './schemas';
 import { generateApiKeyMaterial } from '../domain/api-keys';
+import authPlugin, { requireScope } from '../plugins/auth';
 import dbPlugin from '../plugins/db';
 
 export async function buildServer() {
@@ -32,6 +33,7 @@ export async function buildServer() {
 
   // Register DB plugin early
   await server.register(dbPlugin);
+  await server.register(authPlugin);
 
   // Attach the request id to the response headers
   server.addHook('onSend', async (request, reply, _payload) => {
@@ -88,15 +90,30 @@ export async function buildServer() {
   server.post(
     '/orgs/:id/api-keys',
     {
+      preHandler: [requireScope('api_keys:write')],
       schema: {
         params: createApiKeyParamsSchema,
         response: {
           201: createServiceApiKeyResponseSchema,
+          401: errorResponseSchema,
+          403: errorResponseSchema,
           404: errorResponseSchema,
         },
       },
     },
     async (request, reply) => {
+      if (!request.auth) {
+        return reply.code(401).send({
+          message: 'Unauthorized',
+        });
+      }
+
+      if (request.auth.org_id !== request.params.id) {
+        return reply.code(403).send({
+          message: 'Forbidden',
+        });
+      }
+
       const org = await server.systemDal.getOrg(request.params.id);
       if (!org) {
         return reply.code(404).send({
