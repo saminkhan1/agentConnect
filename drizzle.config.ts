@@ -7,6 +7,6 @@ export default defineConfig({
   out: './src/db/migrations',
   dialect: 'postgresql',
   dbCredentials: {
-    url: process.env.DATABASE_URL ?? 'postgres://postgres:password@localhost:5432/agentconnect_dev',
+    url: process.env.DATABASE_URL ?? 'postgresql://localhost:5432/agentconnect_dev',
   },
 });
