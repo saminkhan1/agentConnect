@@ -6,6 +6,9 @@ import { agents, apiKeys, orgs } from './schema';
 
 type NewAgent = InferInsertModel<typeof agents>;
 type NewApiKey = InferInsertModel<typeof apiKeys>;
+type NewOrg = InferInsertModel<typeof orgs>;
+type OrgRecord = typeof orgs.$inferSelect;
+type ApiKeyRecord = typeof apiKeys.$inferSelect;
 
 function requireOrgId(orgId: string): string {
   if (orgId.trim().length === 0) {
@@ -115,11 +118,31 @@ export class DalFactory {
 
 // Admin / System DAL without org scope restriction
 export const systemDal = {
-  async createOrg(data: InferInsertModel<typeof orgs>) {
+  async createOrg(data: InferInsertModel<typeof orgs>): Promise<OrgRecord> {
     const result = await db.insert(orgs).values(data).returning();
     return result[0];
   },
-  async getOrg(id: string) {
+  async createOrgWithApiKey(data: { org: NewOrg; apiKey: Omit<NewApiKey, 'orgId'> }): Promise<{
+    org: OrgRecord;
+    apiKey: ApiKeyRecord;
+  }> {
+    return db.transaction(async (tx) => {
+      const orgResult = await tx.insert(orgs).values(data.org).returning();
+      const org = orgResult[0];
+
+      const keyResult = await tx
+        .insert(apiKeys)
+        .values({ ...data.apiKey, orgId: org.id })
+        .returning();
+      const apiKey = keyResult[0];
+
+      return {
+        org,
+        apiKey,
+      };
+    });
+  },
+  async getOrg(id: string): Promise<OrgRecord | null> {
     const result = await db.select().from(orgs).where(eq(orgs.id, id)).limit(1);
     return result[0] || null;
   },
