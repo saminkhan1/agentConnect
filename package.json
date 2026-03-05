@@ -11,6 +11,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "tsx --test tests/**/*.test.ts",
+    "test:integration": "npm run db:migrate && tsx --test tests/**/*.integration.ts",
     "verify": "npm run format:check && npm run lint && npm run typecheck && npm test",
     "prepare": "node scripts/setup-git-hooks.cjs",
     "db:generate": "drizzle-kit generate",

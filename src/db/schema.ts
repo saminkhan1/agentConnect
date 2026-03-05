@@ -15,6 +15,7 @@ export const apiKeys = pgTable('api_keys', {
     .notNull(),
   keyType: apiKeyTypeEnum('key_type').notNull(),
   keyHash: text('key_hash').notNull(),
+  isRevoked: boolean('is_revoked').default(false).notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 

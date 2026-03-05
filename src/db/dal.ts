@@ -7,6 +7,7 @@ import { agents, apiKeys, orgs } from './schema';
 type NewAgent = InferInsertModel<typeof agents>;
 type NewApiKey = InferInsertModel<typeof apiKeys>;
 type NewOrg = InferInsertModel<typeof orgs>;
+type AgentRecord = typeof agents.$inferSelect;
 type OrgRecord = typeof orgs.$inferSelect;
 type ApiKeyRecord = typeof apiKeys.$inferSelect;
 
@@ -24,7 +25,7 @@ export class AgentDal {
     this.orgId = requireOrgId(orgId);
   }
 
-  async findById(id: string) {
+  async findById(id: string): Promise<AgentRecord | null> {
     const result = await db
       .select()
       .from(agents)
@@ -33,11 +34,20 @@ export class AgentDal {
     return result[0] || null;
   }
 
-  async findMany() {
-    return db.select().from(agents).where(eq(agents.orgId, this.orgId));
+  async findMany(options?: { includeArchived?: boolean }): Promise<AgentRecord[]> {
+    const includeArchived = options?.includeArchived ?? false;
+
+    if (includeArchived) {
+      return db.select().from(agents).where(eq(agents.orgId, this.orgId));
+    }
+
+    return db
+      .select()
+      .from(agents)
+      .where(and(eq(agents.orgId, this.orgId), eq(agents.isArchived, false)));
   }
 
-  async insert(data: Omit<NewAgent, 'orgId'>) {
+  async insert(data: Omit<NewAgent, 'orgId'>): Promise<AgentRecord> {
     const result = await db
       .insert(agents)
       .values({ ...data, orgId: this.orgId })
@@ -45,7 +55,10 @@ export class AgentDal {
     return result[0];
   }
 
-  async updateById(id: string, data: Partial<Omit<NewAgent, 'orgId' | 'id'>>) {
+  async updateById(
+    id: string,
+    data: Partial<Omit<NewAgent, 'orgId' | 'id'>>,
+  ): Promise<AgentRecord | null> {
     const result = await db
       .update(agents)
       .set(data)
@@ -54,9 +67,10 @@ export class AgentDal {
     return result[0] || null;
   }
 
-  async deleteById(id: string) {
+  async archiveById(id: string): Promise<AgentRecord | null> {
     const result = await db
-      .delete(agents)
+      .update(agents)
+      .set({ isArchived: true })
       .where(and(eq(agents.orgId, this.orgId), eq(agents.id, id)))
       .returning();
     return result[0] || null;

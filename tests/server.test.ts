@@ -123,6 +123,7 @@ void test('POST /orgs creates an org and returns a root key once', async () => {
         orgId: parsedInput.org.id,
         keyType: parsedInput.apiKey.keyType,
         keyHash: parsedInput.apiKey.keyHash,
+        isRevoked: false,
         createdAt,
       },
     });
@@ -227,6 +228,7 @@ void test('POST /orgs/:id/api-keys returns 401 when key secret is invalid', asyn
       orgId: 'org_123',
       keyType: 'root',
       keyHash: knownRootKey.keyHash,
+      isRevoked: false,
       createdAt: new Date('2026-03-01T00:00:00.000Z'),
     });
 
@@ -259,6 +261,7 @@ void test('POST /orgs/:id/api-keys returns 403 when scope is missing', async () 
       orgId: 'org_123',
       keyType: 'service',
       keyHash: serviceKey.keyHash,
+      isRevoked: false,
       createdAt: new Date('2026-03-01T00:00:00.000Z'),
     });
 
@@ -291,6 +294,7 @@ void test('POST /orgs/:id/api-keys creates a service key for a matching root key
       orgId: 'org_123',
       keyType: 'root',
       keyHash: rootKey.keyHash,
+      isRevoked: false,
       createdAt: new Date('2026-03-01T00:00:00.000Z'),
     });
 
@@ -372,6 +376,7 @@ void test('POST /orgs/:id/api-keys returns 403 when auth org does not match rout
       orgId: 'org_123',
       keyType: 'root',
       keyHash: rootKey.keyHash,
+      isRevoked: false,
       createdAt: new Date('2026-03-01T00:00:00.000Z'),
     });
 

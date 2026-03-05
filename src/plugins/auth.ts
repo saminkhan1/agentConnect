@@ -64,6 +64,10 @@ const authPlugin: FastifyPluginCallback = (server, _opts, done) => {
       return sendUnauthorized(reply);
     }
 
+    if (apiKey.isRevoked) {
+      return sendUnauthorized(reply);
+    }
+
     const isValidSecret = await verifyApiKeySecret(parsedApiKey.secret, apiKey.keyHash);
     if (!isValidSecret) {
       return sendUnauthorized(reply);
