@@ -1,0 +1,34 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: agentconnect_dev
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d agentconnect_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Optional Redis service
+  # Redis is not required for the MVP, as Postgres handles both our 
+  # event log and job queue to keep overall infrastructure costs low. 
+  # You can uncomment this Redis service later when higher-fidelity 
+  # rate limiting or caching becomes necessary.
+  # redis:
+  #   image: redis:7-alpine
+  #   restart: unless-stopped
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis_data:/data
+
+volumes:
+  postgres_data:
+  # redis_data:
