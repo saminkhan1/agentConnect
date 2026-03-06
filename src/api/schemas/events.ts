@@ -2,8 +2,6 @@ import { z } from 'zod';
 
 import { eventTypeSchema } from '../../domain/events';
 
-const dateTimeQuerySchema = z.iso.datetime({ offset: true });
-
 export const listAgentEventsParamsSchema = z.object({
   id: z.string().trim().min(1),
 });
@@ -11,8 +9,8 @@ export const listAgentEventsParamsSchema = z.object({
 export const listAgentEventsQuerySchema = z
   .object({
     type: eventTypeSchema.optional(),
-    since: dateTimeQuerySchema.optional(),
-    until: dateTimeQuerySchema.optional(),
+    since: z.iso.datetime({ offset: true }).optional(),
+    until: z.iso.datetime({ offset: true }).optional(),
     limit: z.coerce.number().int().min(1).max(100).default(50),
     cursor: z.string().trim().min(1).optional(),
   })

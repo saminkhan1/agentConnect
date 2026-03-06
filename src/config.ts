@@ -7,11 +7,6 @@ const nodeEnvSchema = z.enum(['development', 'test', 'production']);
 
 const hostSchema = z.string().trim().min(1);
 const logLevelSchema = z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']);
-const postgresUrlSchema = z
-  .url()
-  .refine((value) => value.startsWith('postgres://') || value.startsWith('postgresql://'), {
-    message: 'DATABASE_URL must use postgres:// or postgresql://',
-  });
 
 const serverEnvSchema = z.object({
   NODE_ENV: nodeEnvSchema.optional().default('development'),
@@ -35,7 +30,8 @@ export function resolveDatabaseUrl(env: NodeJS.ProcessEnv = process.env): string
   const parsedEnv = dbEnvSchema.parse(env);
 
   if (parsedEnv.DATABASE_URL && parsedEnv.DATABASE_URL.length > 0) {
-    return postgresUrlSchema.parse(parsedEnv.DATABASE_URL);
+    // Delegate full DSN validation to node-postgres; it supports URL and keyword formats.
+    return parsedEnv.DATABASE_URL;
   }
 
   if (parsedEnv.NODE_ENV === 'production') {

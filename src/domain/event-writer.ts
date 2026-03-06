@@ -82,23 +82,6 @@ const optionalNonEmptyStringSchema = z.preprocess((value) => {
   return trimmedValue.length === 0 ? undefined : trimmedValue;
 }, z.string().min(1).nullable().optional());
 
-const isoDateTimeStringSchema = z.iso.datetime({ offset: true }).refine((value) => {
-  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
-  if (!match) {
-    return false;
-  }
-
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  if (month < 1 || month > 12) {
-    return false;
-  }
-
-  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
-  return day >= 1 && day <= daysInMonth;
-}, 'Invalid occurredAt timestamp');
-
 const writeEventInputSchema = z.object({
   orgId: z.string().trim().min(1),
   agentId: z.string().trim().min(1),
@@ -106,7 +89,7 @@ const writeEventInputSchema = z.object({
   provider: z.string().trim().min(1),
   providerEventId: optionalNonEmptyStringSchema,
   eventType: eventTypeSchema,
-  occurredAt: z.union([z.date(), isoDateTimeStringSchema]).optional(),
+  occurredAt: z.union([z.date(), z.iso.datetime({ offset: true })]).optional(),
   idempotencyKey: optionalNonEmptyStringSchema,
   data: z.unknown(),
 });

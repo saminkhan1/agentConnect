@@ -136,33 +136,6 @@ export class EventDal {
     return result[0];
   }
 
-  async findByProviderEventId(
-    provider: string,
-    providerEventId: string,
-  ): Promise<EventRecord | null> {
-    const result = await db
-      .select()
-      .from(events)
-      .where(
-        and(
-          eq(events.orgId, this.orgId),
-          eq(events.provider, provider),
-          eq(events.providerEventId, providerEventId),
-        ),
-      )
-      .limit(1);
-    return result[0] || null;
-  }
-
-  async findByIdempotencyKey(idempotencyKey: string): Promise<EventRecord | null> {
-    const result = await db
-      .select()
-      .from(events)
-      .where(and(eq(events.orgId, this.orgId), eq(events.idempotencyKey, idempotencyKey)))
-      .limit(1);
-    return result[0] || null;
-  }
-
   async listByAgent(
     agentId: string,
     options: {

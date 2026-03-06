@@ -283,7 +283,7 @@ void test('integration: batch ingestion dedupes and accepts nullable optional fi
     };
     const agentId = createAgentPayload.agent.id;
 
-    const ingestedEvents = await server.ingestProviderEvents('agentmail', [
+    const ingestedEvents = await server.eventWriter.ingestProviderEvents('agentmail', [
       {
         orgId,
         agentId,
@@ -509,7 +509,7 @@ void test('integration: batch ingestion rejects oversized event arrays', async (
     });
 
     await assert.rejects(
-      server.ingestProviderEvents('agentmail', oversizedItems),
+      server.eventWriter.ingestProviderEvents('agentmail', oversizedItems),
       (error: unknown) => {
         assert.ok(error instanceof EventBatchTooLargeError);
         assert.strictEqual(error.maxBatchSize, MAX_INGEST_BATCH_SIZE);
