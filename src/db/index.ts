@@ -14,7 +14,7 @@ function resolveDatabaseUrl(): string {
     throw new Error('DATABASE_URL must be set in production');
   }
 
-  return 'postgresql://localhost:5432/agentconnect_dev';
+  return 'postgresql://postgres:password@localhost:5432/agentconnect_dev';
 }
 
 function createPool() {

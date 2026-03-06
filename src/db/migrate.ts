@@ -5,7 +5,8 @@ import fs from 'fs';
 import path from 'path';
 import { Pool } from 'pg';
 
-const databaseUrl = process.env.DATABASE_URL ?? 'postgresql://localhost:5432/agentconnect_dev';
+const databaseUrl =
+  process.env.DATABASE_URL ?? 'postgresql://postgres:password@localhost:5432/agentconnect_dev';
 
 function resolveMigrationsFolder() {
   const candidates = [
