@@ -6,6 +6,22 @@ on:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: agentconnect_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agentconnect_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:password@localhost:5432/agentconnect_ci
 
     steps:
       - name: Checkout repository
@@ -28,6 +44,9 @@ jobs:
 
       - name: Unit tests
         run: npm test
+
+      - name: Integration tests
+        run: npm run test:integration
 
       - name: Build
         run: npm run build
