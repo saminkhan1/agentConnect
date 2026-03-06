@@ -1,0 +1,1 @@
+ALTER TABLE "api_keys" ADD COLUMN "is_revoked" boolean DEFAULT false NOT NULL;

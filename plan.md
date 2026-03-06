@@ -103,7 +103,7 @@ Use two layers:
 | `init: monorepo scaffold with domain modules` | Top-level dirs: `src/api/`, `src/domain/`, `src/adapters/`, `src/jobs/`, `src/db/`, `tests/`, `docs/`. Keep as modules, not separately deployed services (yet). |
 | `chore: strict tsconfig + lint + format`      | Strict TS, eslint, prettier. Add typecheck, lint, test scripts.                                                                                                 |
 | `chore: docker compose for local dev`         | Postgres 16 only. Add optional Redis service commented out (document why).                                                                                      |
-| `feat: app entrypoint + health + request ids` | Fastify (or Express) + `GET /health`. Add correlation/request ID middleware.                                                                                    |
+| `feat: app entrypoint + health + request ids` | Fastify + `GET /health`. Add correlation/request ID middleware.                                                                                                 |
 | `chore: migrations + db access layer`         | Choose one (Drizzle/Prisma/node-pg-migrate). Implement a DAL pattern that requires `org_id` for all reads/writes.                                               |
 | `migration: orgs + api_keys + agents`         | `orgs`, `api_keys(key_type: root \| service)`, `agents`.                                                                                                        |
 | `feat: org + api key endpoints`               | `POST /orgs` creates org + returns root key once. `POST /orgs/:id/api-keys` creates service keys. Hash keys at rest.                                            |

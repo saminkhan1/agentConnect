@@ -14,10 +14,9 @@ export default tseslint.config(
     },
     rules: {
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
-      '@typescript-eslint/consistent-type-definitions': ['error', 'type'],
     },
   },
   {
-    ignores: ['dist/', 'node_modules/', 'eslint.config.mjs'],
+    ignores: ['dist/', 'node_modules/', 'eslint.config.mjs', 'scripts/setup-git-hooks.cjs'],
   },
 );
