@@ -1,6 +1,7 @@
 import { desc, sql } from 'drizzle-orm';
 import {
   boolean,
+  foreignKey,
   index,
   jsonb,
   pgEnum,
@@ -12,7 +13,10 @@ import {
   varchar,
 } from 'drizzle-orm/pg-core';
 
+import { eventTypeValues } from '../domain/events';
+
 export const apiKeyTypeEnum = pgEnum('api_key_type', ['root', 'service']);
+export const eventTypeEnum = pgEnum('event_type', eventTypeValues);
 
 export const orgs = pgTable('orgs', {
   id: varchar('id', { length: 255 }).primaryKey(),
@@ -31,15 +35,19 @@ export const apiKeys = pgTable('api_keys', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 });
 
-export const agents = pgTable('agents', {
-  id: varchar('id', { length: 255 }).primaryKey(),
-  orgId: varchar('org_id', { length: 255 })
-    .references(() => orgs.id)
-    .notNull(),
-  name: text('name').notNull(),
-  isArchived: boolean('is_archived').default(false).notNull(),
-  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
-});
+export const agents = pgTable(
+  'agents',
+  {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    orgId: varchar('org_id', { length: 255 })
+      .references(() => orgs.id)
+      .notNull(),
+    name: text('name').notNull(),
+    isArchived: boolean('is_archived').default(false).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [uniqueIndex('agents_org_id_id_unique').on(table.orgId, table.id)],
+);
 
 export const events = pgTable(
   'events',
@@ -48,19 +56,22 @@ export const events = pgTable(
     orgId: varchar('org_id', { length: 255 })
       .references(() => orgs.id)
       .notNull(),
-    agentId: varchar('agent_id', { length: 255 })
-      .references(() => agents.id)
-      .notNull(),
+    agentId: varchar('agent_id', { length: 255 }).notNull(),
     resourceId: varchar('resource_id', { length: 255 }),
     provider: text('provider').notNull(),
     providerEventId: text('provider_event_id'),
-    eventType: text('event_type').notNull(),
+    eventType: eventTypeEnum('event_type').notNull(),
     occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull(),
     idempotencyKey: text('idempotency_key'),
-    data: jsonb('data').notNull(),
+    data: jsonb('data').$type<Record<string, unknown>>().notNull(),
     ingestedAt: timestamp('ingested_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
+    foreignKey({
+      columns: [table.orgId, table.agentId],
+      foreignColumns: [agents.orgId, agents.id],
+      name: 'events_org_id_agent_id_agents_org_id_id_fk',
+    }),
     uniqueIndex('events_org_provider_provider_event_id_unique')
       .on(table.orgId, table.provider, table.providerEventId)
       .where(sql`${table.providerEventId} is not null`),

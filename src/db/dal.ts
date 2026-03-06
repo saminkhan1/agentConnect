@@ -1,15 +1,22 @@
-import { and, eq } from 'drizzle-orm';
-import { InferInsertModel } from 'drizzle-orm';
+import { and, desc, eq, gte, InferInsertModel, lt, lte, or } from 'drizzle-orm';
 
 import { db } from './index';
-import { agents, apiKeys, orgs } from './schema';
+import { agents, apiKeys, events, orgs } from './schema';
+import type { EventType } from '../domain/events';
 
 type NewAgent = InferInsertModel<typeof agents>;
 type NewApiKey = InferInsertModel<typeof apiKeys>;
+type NewEvent = InferInsertModel<typeof events>;
 type NewOrg = InferInsertModel<typeof orgs>;
 type AgentRecord = typeof agents.$inferSelect;
 type OrgRecord = typeof orgs.$inferSelect;
 type ApiKeyRecord = typeof apiKeys.$inferSelect;
+type EventRecord = typeof events.$inferSelect;
+
+type EventCursor = {
+  occurredAt: Date;
+  id: string;
+};
 
 function requireOrgId(orgId: string): string {
   if (orgId.trim().length === 0) {
@@ -114,6 +121,92 @@ export class ApiKeyDal {
   }
 }
 
+export class EventDal {
+  private readonly orgId: string;
+
+  constructor(orgId: string) {
+    this.orgId = requireOrgId(orgId);
+  }
+
+  async insert(data: Omit<NewEvent, 'orgId'>): Promise<EventRecord> {
+    const result = await db
+      .insert(events)
+      .values({ ...data, orgId: this.orgId })
+      .returning();
+    return result[0];
+  }
+
+  async findByProviderEventId(
+    provider: string,
+    providerEventId: string,
+  ): Promise<EventRecord | null> {
+    const result = await db
+      .select()
+      .from(events)
+      .where(
+        and(
+          eq(events.orgId, this.orgId),
+          eq(events.provider, provider),
+          eq(events.providerEventId, providerEventId),
+        ),
+      )
+      .limit(1);
+    return result[0] || null;
+  }
+
+  async findByIdempotencyKey(idempotencyKey: string): Promise<EventRecord | null> {
+    const result = await db
+      .select()
+      .from(events)
+      .where(and(eq(events.orgId, this.orgId), eq(events.idempotencyKey, idempotencyKey)))
+      .limit(1);
+    return result[0] || null;
+  }
+
+  async listByAgent(
+    agentId: string,
+    options: {
+      eventType?: EventType;
+      since?: Date;
+      until?: Date;
+      cursor?: EventCursor;
+      limit: number;
+    },
+  ): Promise<EventRecord[]> {
+    const conditions = [eq(events.orgId, this.orgId), eq(events.agentId, agentId)];
+
+    if (options.eventType) {
+      conditions.push(eq(events.eventType, options.eventType));
+    }
+
+    if (options.since) {
+      conditions.push(gte(events.occurredAt, options.since));
+    }
+
+    if (options.until) {
+      conditions.push(lte(events.occurredAt, options.until));
+    }
+
+    if (options.cursor) {
+      const cursorCondition = or(
+        lt(events.occurredAt, options.cursor.occurredAt),
+        and(eq(events.occurredAt, options.cursor.occurredAt), lt(events.id, options.cursor.id)),
+      );
+
+      if (cursorCondition) {
+        conditions.push(cursorCondition);
+      }
+    }
+
+    return db
+      .select()
+      .from(events)
+      .where(and(...conditions))
+      .orderBy(desc(events.occurredAt), desc(events.id))
+      .limit(options.limit);
+  }
+}
+
 export class DalFactory {
   private readonly orgId: string;
 
@@ -128,9 +221,12 @@ export class DalFactory {
   get apiKeys() {
     return new ApiKeyDal(this.orgId);
   }
+
+  get events() {
+    return new EventDal(this.orgId);
+  }
 }
 
-// Admin / System DAL without org scope restriction
 export const systemDal = {
   async createOrg(data: InferInsertModel<typeof orgs>): Promise<OrgRecord> {
     const result = await db.insert(orgs).values(data).returning();

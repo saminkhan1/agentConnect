@@ -1,2 +1,0 @@
-CREATE TYPE "public"."api_key_type" AS ENUM('root', 'service');--> statement-breakpoint
-ALTER TABLE "api_keys" ALTER COLUMN "key_type" SET DATA TYPE "public"."api_key_type" USING "key_type"::"public"."api_key_type";
