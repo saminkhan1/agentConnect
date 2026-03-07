@@ -17,6 +17,13 @@ import { eventTypeValues } from '../domain/events';
 
 export const apiKeyTypeEnum = pgEnum('api_key_type', ['root', 'service']);
 export const eventTypeEnum = pgEnum('event_type', eventTypeValues);
+export const resourceTypeEnum = pgEnum('resource_type', ['email_inbox', 'card']);
+export const resourceStateEnum = pgEnum('resource_state', [
+  'provisioning',
+  'active',
+  'suspended',
+  'deleted',
+]);
 
 export const orgs = pgTable('orgs', {
   id: varchar('id', { length: 255 }).primaryKey(),
@@ -47,6 +54,34 @@ export const agents = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [uniqueIndex('agents_org_id_id_unique').on(table.orgId, table.id)],
+);
+
+export const resources = pgTable(
+  'resources',
+  {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    orgId: varchar('org_id', { length: 255 })
+      .references(() => orgs.id)
+      .notNull(),
+    agentId: varchar('agent_id', { length: 255 }).notNull(),
+    type: resourceTypeEnum('type').notNull(),
+    provider: text('provider').notNull(),
+    providerRef: text('provider_ref'),
+    config: jsonb('config').$type<Record<string, unknown>>().notNull().default({}),
+    state: resourceStateEnum('state').notNull().default('provisioning'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.orgId, table.agentId],
+      foreignColumns: [agents.orgId, agents.id],
+    }),
+    uniqueIndex('resources_org_provider_provider_ref_unique')
+      .on(table.orgId, table.provider, table.providerRef)
+      .where(sql`${table.providerRef} is not null`),
+    index('resources_org_agent_idx').on(table.orgId, table.agentId),
+  ],
 );
 
 export const events = pgTable(

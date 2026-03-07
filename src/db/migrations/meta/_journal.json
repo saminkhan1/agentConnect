@@ -8,6 +8,13 @@
       "when": 1772765547195,
       "tag": "0000_initial",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1772911332890,
+      "tag": "0001_same_prowler",
+      "breakpoints": true
     }
   ]
 }
