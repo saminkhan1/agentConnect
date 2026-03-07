@@ -5,29 +5,8 @@
     {
       "idx": 0,
       "version": "7",
-      "when": 1772742330361,
-      "tag": "0000_tiny_purifiers",
-      "breakpoints": true
-    },
-    {
-      "idx": 1,
-      "version": "7",
-      "when": 1772744870111,
-      "tag": "0001_spooky_mulholland_black",
-      "breakpoints": true
-    },
-    {
-      "idx": 2,
-      "version": "7",
-      "when": 1772750373101,
-      "tag": "0002_old_songbird",
-      "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "7",
-      "when": 1772754173507,
-      "tag": "0003_secret_bromley",
+      "when": 1772765547195,
+      "tag": "0000_initial",
       "breakpoints": true
     }
   ]

@@ -5,8 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import { Pool } from 'pg';
 
-const databaseUrl =
-  process.env.DATABASE_URL ?? 'postgresql://postgres:password@localhost:5432/agentconnect_dev';
+import { resolveDatabaseUrl } from '../config';
 
 function resolveMigrationsFolder() {
   const candidates = [
@@ -27,7 +26,7 @@ function resolveMigrationsFolder() {
 async function main() {
   console.log('Running migrations...');
   const pool = new Pool({
-    connectionString: databaseUrl,
+    connectionString: resolveDatabaseUrl(process.env),
     max: 1, // Only one connection needed for migrations
   });
 

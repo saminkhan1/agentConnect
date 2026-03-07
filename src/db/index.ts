@@ -2,24 +2,12 @@ import 'dotenv/config';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
 
+import { resolveDatabaseUrl } from '../config';
 import * as schema from './schema';
-
-function resolveDatabaseUrl(): string {
-  const configuredUrl = process.env.DATABASE_URL;
-  if (configuredUrl && configuredUrl.trim().length > 0) {
-    return configuredUrl;
-  }
-
-  if (process.env.NODE_ENV === 'production') {
-    throw new Error('DATABASE_URL must be set in production');
-  }
-
-  return 'postgresql://postgres:password@localhost:5432/agentconnect_dev';
-}
 
 function createPool() {
   return new Pool({
-    connectionString: resolveDatabaseUrl(),
+    connectionString: resolveDatabaseUrl(process.env),
     // Allows tests/short-lived scripts to exit cleanly without explicit pool shutdown.
     allowExitOnIdle: true,
   });

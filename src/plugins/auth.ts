@@ -83,4 +83,7 @@ const authPlugin: FastifyPluginCallback = (server, _opts, done) => {
   done();
 };
 
-export default fp(authPlugin, { name: 'auth' });
+export default fp(authPlugin, {
+  name: 'auth',
+  dependencies: ['db'],
+});
