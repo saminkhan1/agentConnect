@@ -219,6 +219,31 @@ function buildWebhookPayload(overrides?: Record<string, unknown>) {
 // send_email action tests
 // ---------------------------------------------------------------------------
 
+void test('POST /agents/:id/actions/send_email returns 404 when agent is archived', async () => {
+  const server = await buildServer();
+  const { authorizationHeader, restore } = await installAuthApiKey(server);
+  const archivedAgent = buildAgentRecord({ isArchived: true });
+
+  const restoreAgents = installAgentsDalMock({ findById: (_id) => Promise.resolve(archivedAgent) });
+
+  try {
+    const response = await server.inject({
+      method: 'POST',
+      url: '/agents/agt_123/actions/send_email',
+      headers: { authorization: authorizationHeader },
+      payload: { to: ['user@example.com'], subject: 'Hi', text: 'Hello' },
+    });
+
+    assert.strictEqual(response.statusCode, 404);
+    const body = JSON.parse(response.payload) as { message: string };
+    assert.strictEqual(body.message, 'Agent not found');
+  } finally {
+    restore();
+    restoreAgents();
+    await server.close();
+  }
+});
+
 void test('POST /agents/:id/actions/send_email returns 404 when no active agentmail inbox', async () => {
   const server = await buildServer();
   const { authorizationHeader, restore } = await installAuthApiKey(server);

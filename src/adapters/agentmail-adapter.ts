@@ -95,7 +95,12 @@ export class AgentMailAdapter implements ProviderAdapter {
   }
 
   parseWebhook(rawBody: Buffer, _headers: Record<string, string>): Promise<ParsedWebhookEvent[]> {
-    const payload = JSON.parse(rawBody.toString()) as AgentMailWebhookPayload;
+    let payload: AgentMailWebhookPayload;
+    try {
+      payload = JSON.parse(rawBody.toString()) as AgentMailWebhookPayload;
+    } catch {
+      return Promise.resolve([]);
+    }
 
     const eventType = AGENTMAIL_EVENT_TYPE_MAP[payload.event_type];
     if (!eventType) {

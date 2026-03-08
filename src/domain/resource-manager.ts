@@ -43,6 +43,7 @@ export class ResourceManager {
       throw err;
     }
 
+    // Adapter output takes precedence over user config for provider-managed fields
     const mergedConfig = { ...config, ...(result.config ?? {}) };
     const parsedConfig = resourceConfigSchema.safeParse(mergedConfig);
     if (!parsedConfig.success) {

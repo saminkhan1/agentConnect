@@ -1,5 +1,3 @@
-import crypto from 'node:crypto';
-
 import type { InferSelectModel } from 'drizzle-orm';
 import type { FastifyPluginCallbackZod } from 'fastify-type-provider-zod';
 import fp from 'fastify-plugin';
@@ -102,7 +100,7 @@ const actionsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
         eventType: EVENT_TYPES.EMAIL_SENT,
         idempotencyKey: idempotency_key,
         data: {
-          message_id: (actionResult['message_id'] as string) || crypto.randomUUID(),
+          message_id: (actionResult['message_id'] as string) || '',
           from: emailResource.providerRef,
           to,
           subject,
