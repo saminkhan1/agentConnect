@@ -11,9 +11,13 @@ export class WebhookProcessor {
     );
     if (eventsWithRef.length === 0) return;
 
-    const uniqueRefs = [...new Set(eventsWithRef.map((e) => e.resourceRef))];
+    // Build ref→providerOrgId in one pass, then deduplicate refs
+    const refProviderOrgId = new Map(eventsWithRef.map((e) => [e.resourceRef, e.providerOrgId]));
+    const uniqueRefs = [...refProviderOrgId.keys()];
     const fetched = await Promise.all(
-      uniqueRefs.map((ref) => systemDal.findResourceByProviderRef(provider, ref)),
+      uniqueRefs.map((ref) =>
+        systemDal.findResourceByProviderRef(provider, ref, refProviderOrgId.get(ref)),
+      ),
     );
     const byRef = new Map(uniqueRefs.flatMap((ref, i) => (fetched[i] ? [[ref, fetched[i]]] : [])));
 

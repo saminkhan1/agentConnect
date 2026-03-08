@@ -67,6 +67,7 @@ export const resources = pgTable(
     type: resourceTypeEnum('type').notNull(),
     provider: text('provider').notNull(),
     providerRef: text('provider_ref'),
+    providerOrgId: text('provider_org_id'),
     config: jsonb('config').$type<Record<string, unknown>>().notNull().default({}),
     state: resourceStateEnum('state').notNull().default('provisioning'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),

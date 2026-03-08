@@ -3,44 +3,16 @@ import test from 'node:test';
 
 import { buildServer } from '../src/api/server';
 import { DalFactory } from '../src/db/dal';
-import { generateApiKeyMaterial } from '../src/domain/api-keys';
 import { AppError } from '../src/domain/errors';
 import { enforceEmailPolicy } from '../src/domain/policy';
 import type { ResourceManager } from '../src/domain/resource-manager';
-
-const FIXED_TIMESTAMP = new Date('2026-03-01T00:00:00.000Z');
-
-type AgentRecord = {
-  id: string;
-  orgId: string;
-  name: string;
-  isArchived: boolean;
-  createdAt: Date;
-};
-
-type ResourceRecord = {
-  id: string;
-  orgId: string;
-  agentId: string;
-  type: 'email_inbox' | 'card';
-  provider: string;
-  providerRef: string | null;
-  config: Record<string, unknown>;
-  state: 'provisioning' | 'active' | 'suspended' | 'deleted';
-  createdAt: Date;
-  updatedAt: Date;
-};
-
-function buildAgentRecord(overrides?: Partial<AgentRecord>): AgentRecord {
-  return {
-    id: 'agt_123',
-    orgId: 'org_123',
-    name: 'Agent One',
-    isArchived: false,
-    createdAt: FIXED_TIMESTAMP,
-    ...overrides,
-  };
-}
+import {
+  FIXED_TIMESTAMP,
+  ResourceRecord,
+  buildAgentRecord,
+  installAgentsDalMock,
+  installAuthApiKey,
+} from './helpers';
 
 function buildResourceRecord(overrides?: Partial<ResourceRecord>): ResourceRecord {
   return {
@@ -50,55 +22,12 @@ function buildResourceRecord(overrides?: Partial<ResourceRecord>): ResourceRecor
     type: 'email_inbox',
     provider: 'mock',
     providerRef: 'mock_ref_123',
+    providerOrgId: null,
     config: {},
     state: 'active',
     createdAt: FIXED_TIMESTAMP,
     updatedAt: FIXED_TIMESTAMP,
     ...overrides,
-  };
-}
-
-async function installAuthApiKey(
-  server: Awaited<ReturnType<typeof buildServer>>,
-  options?: {
-    orgId?: string;
-    keyType?: 'root' | 'service';
-    isRevoked?: boolean;
-  },
-) {
-  const keyMaterial = await generateApiKeyMaterial();
-  const originalGetApiKeyById = server.systemDal.getApiKeyById.bind(server.systemDal);
-
-  server.systemDal.getApiKeyById = (_id) =>
-    Promise.resolve({
-      id: keyMaterial.id,
-      orgId: options?.orgId ?? 'org_123',
-      keyType: options?.keyType ?? 'root',
-      keyHash: keyMaterial.keyHash,
-      isRevoked: options?.isRevoked ?? false,
-      createdAt: FIXED_TIMESTAMP,
-    });
-
-  return {
-    authorizationHeader: `Bearer ${keyMaterial.plaintextKey}`,
-    restore: () => {
-      server.systemDal.getApiKeyById = originalGetApiKeyById;
-    },
-  };
-}
-
-function installAgentsDalMock(methods: { findById?: (id: string) => Promise<AgentRecord | null> }) {
-  const originalDescriptor = Object.getOwnPropertyDescriptor(DalFactory.prototype, 'agents');
-  Object.defineProperty(DalFactory.prototype, 'agents', {
-    configurable: true,
-    get() {
-      return methods;
-    },
-  });
-  return () => {
-    if (originalDescriptor) {
-      Object.defineProperty(DalFactory.prototype, 'agents', originalDescriptor);
-    }
   };
 }
 

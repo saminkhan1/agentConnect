@@ -46,7 +46,7 @@ export class AgentMailAdapter implements ProviderAdapter {
 
   async provision(_agentId: string, _config: Record<string, unknown>): Promise<ProvisionResult> {
     const inbox = await this.client.inboxes.create(undefined);
-    return { providerRef: inbox.inboxId };
+    return { providerRef: inbox.inboxId, providerOrgId: inbox.podId };
   }
 
   async deprovision(resource: Resource): Promise<DeprovisionResult> {
@@ -112,6 +112,7 @@ export class AgentMailAdapter implements ProviderAdapter {
     return Promise.resolve([
       {
         resourceRef: payload.inbox_id,
+        providerOrgId: payload.organization_id,
         provider: this.providerName,
         providerEventId: payload.event_id,
         eventType,

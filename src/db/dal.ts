@@ -281,17 +281,20 @@ export const systemDal = {
   async findResourceByProviderRef(
     provider: string,
     providerRef: string,
+    providerOrgId?: string,
   ): Promise<ResourceRecord | null> {
+    const conditions = [
+      eq(resources.provider, provider),
+      eq(resources.providerRef, providerRef),
+      ne(resources.state, 'deleted'),
+    ];
+    if (providerOrgId) {
+      conditions.push(eq(resources.providerOrgId, providerOrgId));
+    }
     const rows = await db
       .select()
       .from(resources)
-      .where(
-        and(
-          eq(resources.provider, provider),
-          eq(resources.providerRef, providerRef),
-          ne(resources.state, 'deleted'),
-        ),
-      )
+      .where(and(...conditions))
       .limit(1);
     return rows[0] ?? null;
   },

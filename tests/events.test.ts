@@ -5,9 +5,12 @@ import { z } from 'zod';
 import { buildServer } from '../src/api/server';
 import { DalFactory } from '../src/db/dal';
 import { EVENT_TYPES, eventTypeSchema, validateEventData } from '../src/domain/events';
-import { generateApiKeyMaterial } from '../src/domain/api-keys';
-
-const FIXED_TIMESTAMP = new Date('2026-03-01T00:00:00.000Z');
+import {
+  FIXED_TIMESTAMP,
+  buildAgentRecord,
+  installAgentsDalMock,
+  installAuthApiKey,
+} from './helpers';
 
 const errorResponseSchema = z.object({
   message: z.string(),
@@ -32,14 +35,6 @@ const listEventsResponseSchema = z.object({
   nextCursor: z.string().nullable(),
 });
 
-type AgentRecord = {
-  id: string;
-  orgId: string;
-  name: string;
-  isArchived: boolean;
-  createdAt: Date;
-};
-
 type EventRecord = {
   id: string;
   orgId: string;
@@ -53,17 +48,6 @@ type EventRecord = {
   data: Record<string, unknown>;
   ingestedAt: Date;
 };
-
-function buildAgentRecord(overrides?: Partial<AgentRecord>): AgentRecord {
-  return {
-    id: 'agt_123',
-    orgId: 'org_123',
-    name: 'Agent One',
-    isArchived: false,
-    createdAt: FIXED_TIMESTAMP,
-    ...overrides,
-  };
-}
 
 function buildEventRecord(overrides?: Partial<EventRecord>): EventRecord {
   return {
@@ -82,51 +66,6 @@ function buildEventRecord(overrides?: Partial<EventRecord>): EventRecord {
     },
     ingestedAt: FIXED_TIMESTAMP,
     ...overrides,
-  };
-}
-
-async function installAuthApiKey(
-  server: Awaited<ReturnType<typeof buildServer>>,
-  options?: {
-    orgId?: string;
-    keyType?: 'root' | 'service';
-    isRevoked?: boolean;
-  },
-) {
-  const keyMaterial = await generateApiKeyMaterial();
-  const originalGetApiKeyById = server.systemDal.getApiKeyById.bind(server.systemDal);
-
-  server.systemDal.getApiKeyById = (_id) =>
-    Promise.resolve({
-      id: keyMaterial.id,
-      orgId: options?.orgId ?? 'org_123',
-      keyType: options?.keyType ?? 'root',
-      keyHash: keyMaterial.keyHash,
-      isRevoked: options?.isRevoked ?? false,
-      createdAt: FIXED_TIMESTAMP,
-    });
-
-  return {
-    authorizationHeader: `Bearer ${keyMaterial.plaintextKey}`,
-    restore: () => {
-      server.systemDal.getApiKeyById = originalGetApiKeyById;
-    },
-  };
-}
-
-function installAgentsDalMock(methods: { findById?: (id: string) => Promise<AgentRecord | null> }) {
-  const originalDescriptor = Object.getOwnPropertyDescriptor(DalFactory.prototype, 'agents');
-  Object.defineProperty(DalFactory.prototype, 'agents', {
-    configurable: true,
-    get() {
-      return methods;
-    },
-  });
-
-  return () => {
-    if (originalDescriptor) {
-      Object.defineProperty(DalFactory.prototype, 'agents', originalDescriptor);
-    }
   };
 }
 

@@ -6,6 +6,7 @@ export type Resource = InferSelectModel<typeof resources>;
 
 export type ProvisionResult = {
   providerRef: string;
+  providerOrgId?: string;
   config?: Record<string, unknown>;
 };
 
@@ -14,6 +15,7 @@ export type DeprovisionResult = {};
 
 export type ParsedWebhookEvent = Omit<WriteEventInput, 'orgId' | 'agentId'> & {
   resourceRef?: string; // provider_ref to find the resource
+  providerOrgId?: string; // provider-side org identifier for tenant-scoped lookup
 };
 
 export interface ProviderAdapter {

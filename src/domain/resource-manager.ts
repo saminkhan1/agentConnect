@@ -47,18 +47,31 @@ export class ResourceManager {
     const mergedConfig = { ...config, ...(result.config ?? {}) };
     const parsedConfig = resourceConfigSchema.safeParse(mergedConfig);
     if (!parsedConfig.success) {
+      await dal.resources.updateById(id, { state: 'deleted' }).catch(() => {});
       throw new AppError(
         'INTERNAL',
         500,
         `Adapter '${provider}' returned invalid config: ${parsedConfig.error.message}`,
       );
     }
-    const updated = await dal.resources.updateById(id, {
-      providerRef: result.providerRef,
-      config: parsedConfig.data,
-      state: 'active',
-    });
-    if (!updated) throw new AppError('INTERNAL', 500, 'Resource update failed unexpectedly');
+
+    let updated: Resource | null;
+    try {
+      updated = await dal.resources.updateById(id, {
+        providerRef: result.providerRef,
+        providerOrgId: result.providerOrgId,
+        config: parsedConfig.data,
+        state: 'active',
+      });
+    } catch (updateErr) {
+      await dal.resources.updateById(id, { state: 'deleted' }).catch(() => {});
+      throw updateErr;
+    }
+
+    if (!updated) {
+      await dal.resources.updateById(id, { state: 'deleted' }).catch(() => {});
+      throw new AppError('INTERNAL', 500, 'Resource update failed unexpectedly');
+    }
     return updated;
   }
 

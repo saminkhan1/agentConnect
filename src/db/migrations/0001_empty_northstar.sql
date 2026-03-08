@@ -1,0 +1,1 @@
+ALTER TABLE "resources" ADD COLUMN "provider_org_id" text;
