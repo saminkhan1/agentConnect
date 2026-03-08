@@ -5,8 +5,8 @@
   "scripts": {
     "dev": "tsx watch src/api/server.ts",
     "build": "tsc",
-    "test": "tsx --test 'tests/*.test.ts'",
-    "test:integration": "drizzle-kit migrate && tsx --test 'tests/*.integration.ts'",
+    "test": "tsx --test tests/*.test.ts",
+    "test:integration": "drizzle-kit migrate && tsx --test tests/*.integration.ts",
     "verify": "prettier --check . && eslint . && tsc --noEmit && npm run test && npm run  test:integration",
     "fix": "eslint . --fix && prettier --write .",
     "prepare": "node scripts/setup-git-hooks.cjs",
