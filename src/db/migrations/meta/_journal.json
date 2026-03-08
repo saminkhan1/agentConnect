@@ -15,6 +15,13 @@
       "when": 1772911332890,
       "tag": "0001_same_prowler",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1772935195383,
+      "tag": "0002_familiar_forge",
+      "breakpoints": true
     }
   ]
 }
