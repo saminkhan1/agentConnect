@@ -10,11 +10,13 @@ import eventsRoutes from './routes/events';
 import healthRoutes from './routes/health';
 import orgRoutes from './routes/orgs';
 import resourceRoutes from './routes/resources';
+import webhookRoutes from './routes/webhooks';
 import authPlugin from '../plugins/auth';
 import { getServerConfig } from '../config';
 import dbPlugin from '../plugins/db';
 import eventServicesPlugin from '../plugins/event-services';
 import resourceServicesPlugin from '../plugins/resource-services';
+import webhookServicesPlugin from '../plugins/webhook-services';
 
 export async function buildServer() {
   const config = getServerConfig(process.env);
@@ -50,11 +52,13 @@ export async function buildServer() {
   await server.register(authPlugin);
   await server.register(eventServicesPlugin);
   await server.register(resourceServicesPlugin);
+  await server.register(webhookServicesPlugin);
 
   server.addHook('onSend', async (request, reply, _payload) => {
     reply.header('x-correlation-id', request.id);
   });
 
+  await server.register(webhookRoutes);
   await server.register(healthRoutes);
   await server.register(orgRoutes);
   await server.register(agentsRoutes);

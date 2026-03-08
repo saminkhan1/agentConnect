@@ -257,6 +257,23 @@ export class DalFactory {
 }
 
 export const systemDal = {
+  async findResourceByProviderRef(
+    provider: string,
+    providerRef: string,
+  ): Promise<ResourceRecord | null> {
+    const rows = await db
+      .select()
+      .from(resources)
+      .where(
+        and(
+          eq(resources.provider, provider),
+          eq(resources.providerRef, providerRef),
+          ne(resources.state, 'deleted'),
+        ),
+      )
+      .limit(1);
+    return rows[0] ?? null;
+  },
   async createOrg(data: InferInsertModel<typeof orgs>): Promise<OrgRecord> {
     const result = await db.insert(orgs).values(data).returning();
     return result[0];
