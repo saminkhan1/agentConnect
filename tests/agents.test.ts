@@ -4,9 +4,7 @@ import { z } from 'zod';
 
 import { buildServer } from '../src/api/server';
 import { DalFactory } from '../src/db/dal';
-import { generateApiKeyMaterial } from '../src/domain/api-keys';
-
-const FIXED_TIMESTAMP = new Date('2026-03-01T00:00:00.000Z');
+import { AgentRecord, buildAgentRecord, installAuthApiKey } from './helpers';
 
 const errorResponseSchema = z.object({
   message: z.string(),
@@ -27,54 +25,6 @@ const singleAgentResponseSchema = z.object({
 const listAgentsResponseSchema = z.object({
   agents: z.array(agentResponseSchema),
 });
-
-type AgentRecord = {
-  id: string;
-  orgId: string;
-  name: string;
-  isArchived: boolean;
-  createdAt: Date;
-};
-
-function buildAgentRecord(overrides?: Partial<AgentRecord>): AgentRecord {
-  return {
-    id: 'agt_123',
-    orgId: 'org_123',
-    name: 'Agent One',
-    isArchived: false,
-    createdAt: FIXED_TIMESTAMP,
-    ...overrides,
-  };
-}
-
-async function installAuthApiKey(
-  server: Awaited<ReturnType<typeof buildServer>>,
-  options?: {
-    orgId?: string;
-    keyType?: 'root' | 'service';
-    isRevoked?: boolean;
-  },
-) {
-  const keyMaterial = await generateApiKeyMaterial();
-  const originalGetApiKeyById = server.systemDal.getApiKeyById.bind(server.systemDal);
-
-  server.systemDal.getApiKeyById = (_id) =>
-    Promise.resolve({
-      id: keyMaterial.id,
-      orgId: options?.orgId ?? 'org_123',
-      keyType: options?.keyType ?? 'root',
-      keyHash: keyMaterial.keyHash,
-      isRevoked: options?.isRevoked ?? false,
-      createdAt: FIXED_TIMESTAMP,
-    });
-
-  return {
-    authorizationHeader: `Bearer ${keyMaterial.plaintextKey}`,
-    restore: () => {
-      server.systemDal.getApiKeyById = originalGetApiKeyById;
-    },
-  };
-}
 
 function installAgentsDalMock(methods: {
   insert?: (data: unknown) => Promise<AgentRecord>;

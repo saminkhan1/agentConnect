@@ -9,6 +9,8 @@ export const eventTypeValues = [
   'email.received',
   'email.delivered',
   'email.bounced',
+  'email.complained',
+  'email.rejected',
   'payment.card.issued',
   'payment.card.authorized',
   'payment.card.declined',
@@ -20,6 +22,8 @@ export const EVENT_TYPES = {
   EMAIL_RECEIVED: 'email.received',
   EMAIL_DELIVERED: 'email.delivered',
   EMAIL_BOUNCED: 'email.bounced',
+  EMAIL_COMPLAINED: 'email.complained',
+  EMAIL_REJECTED: 'email.rejected',
   PAYMENT_CARD_ISSUED: 'payment.card.issued',
   PAYMENT_CARD_AUTHORIZED: 'payment.card.authorized',
   PAYMENT_CARD_DECLINED: 'payment.card.declined',
@@ -60,6 +64,20 @@ export const eventDataSchemas = {
     })
     .loose(),
   [EVENT_TYPES.EMAIL_BOUNCED]: z
+    .object({
+      message_id: nonEmptyStringSchema,
+      thread_id: optionalNonEmptyStringSchema,
+      reason: optionalNonEmptyStringSchema,
+    })
+    .loose(),
+  [EVENT_TYPES.EMAIL_COMPLAINED]: z
+    .object({
+      message_id: nonEmptyStringSchema,
+      thread_id: optionalNonEmptyStringSchema,
+      reason: optionalNonEmptyStringSchema,
+    })
+    .loose(),
+  [EVENT_TYPES.EMAIL_REJECTED]: z
     .object({
       message_id: nonEmptyStringSchema,
       thread_id: optionalNonEmptyStringSchema,
