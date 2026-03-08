@@ -4,6 +4,7 @@ import fp from 'fastify-plugin';
 import { AgentMailAdapter } from '../adapters/agentmail-adapter';
 import { MockAdapter } from '../adapters/mock-adapter';
 import type { ProviderAdapter } from '../adapters/provider-adapter';
+import { StripeAdapter } from '../adapters/stripe-adapter';
 import { getServerConfig } from '../config';
 import { ResourceManager } from '../domain/resource-manager';
 
@@ -11,6 +12,7 @@ declare module 'fastify' {
   interface FastifyInstance {
     resourceManager: ResourceManager;
     agentMailAdapter?: AgentMailAdapter;
+    stripeAdapter?: StripeAdapter;
   }
 }
 
@@ -25,6 +27,12 @@ const resourceServicesPlugin: FastifyPluginCallback = (server, _opts, done) => {
     );
     adapters.set('agentmail', agentMailAdapter);
     server.decorate('agentMailAdapter', agentMailAdapter);
+  }
+
+  if (config.STRIPE_SECRET_KEY && config.STRIPE_WEBHOOK_SECRET) {
+    const stripeAdapter = new StripeAdapter(config.STRIPE_SECRET_KEY, config.STRIPE_WEBHOOK_SECRET);
+    adapters.set('stripe', stripeAdapter);
+    server.decorate('stripeAdapter', stripeAdapter);
   }
 
   server.decorate('resourceManager', new ResourceManager(adapters));

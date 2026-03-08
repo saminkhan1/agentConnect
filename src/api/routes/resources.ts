@@ -14,7 +14,7 @@ import { AppError } from '../../domain/errors';
 
 type ResourceRecord = typeof resourcesTable.$inferSelect;
 
-function serializeResource(r: ResourceRecord) {
+export function serializeResource(r: ResourceRecord) {
   return {
     id: r.id,
     orgId: r.orgId,
@@ -39,6 +39,7 @@ const resourceRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
         body: createResourceBodySchema,
         response: {
           201: createResourceResponseSchema,
+          400: errorResponseSchema,
           401: errorResponseSchema,
           403: errorResponseSchema,
           404: errorResponseSchema,
@@ -56,8 +57,14 @@ const resourceRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
         return reply.code(404).send({ message: 'Agent not found' });
       }
 
+      if (request.body.type === 'card' && request.body.provider === 'stripe') {
+        return reply
+          .code(400)
+          .send({ message: 'Stripe cards must be issued via POST /agents/:id/actions/issue_card' });
+      }
+
       try {
-        const resource = await server.resourceManager.provision(
+        const { resource } = await server.resourceManager.provision(
           dal,
           request.params.id,
           request.body.type,

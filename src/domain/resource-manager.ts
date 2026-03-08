@@ -5,6 +5,25 @@ import type { DalFactory } from '../db/dal';
 import { AppError } from './errors';
 import { resourceConfigSchema } from './policy';
 
+type ProvisionOptions = {
+  resourceId?: string;
+};
+
+type ProvisionOutcome = {
+  resource: Resource;
+  sensitiveData?: Record<string, unknown>;
+  reusedExisting?: boolean;
+};
+
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: unknown }).code === '23505'
+  );
+}
+
 export class ResourceManager {
   constructor(private readonly adapters: Map<string, ProviderAdapter>) {}
 
@@ -22,18 +41,46 @@ export class ResourceManager {
     type: 'email_inbox' | 'card',
     provider: string,
     config: Record<string, unknown>,
-  ): Promise<Resource> {
+    options?: ProvisionOptions,
+  ): Promise<ProvisionOutcome> {
     const adapter = this.getAdapter(provider);
-    const id = `res_${crypto.randomUUID()}`;
+    const id = options?.resourceId ?? `res_${crypto.randomUUID()}`;
 
-    await dal.resources.insert({
-      id,
-      agentId,
-      type,
-      provider,
-      config,
-      state: 'provisioning',
-    });
+    const existing = options?.resourceId ? await dal.resources.findById(id) : null;
+    if (existing) {
+      if (existing.state !== 'deleted') {
+        return { resource: existing, reusedExisting: true };
+      }
+
+      const reset = await dal.resources.updateById(id, {
+        providerRef: null,
+        providerOrgId: null,
+        config,
+        state: 'provisioning',
+      });
+      if (!reset) {
+        throw new AppError('INTERNAL', 500, 'Failed to reset idempotent resource state');
+      }
+    } else {
+      try {
+        await dal.resources.insert({
+          id,
+          agentId,
+          type,
+          provider,
+          config,
+          state: 'provisioning',
+        });
+      } catch (err) {
+        if (options?.resourceId && isUniqueViolation(err)) {
+          const duplicated = await dal.resources.findById(id);
+          if (duplicated) {
+            return { resource: duplicated, reusedExisting: true };
+          }
+        }
+        throw err;
+      }
+    }
 
     let result: ProvisionResult;
     try {
@@ -72,7 +119,7 @@ export class ResourceManager {
       await dal.resources.updateById(id, { state: 'deleted' }).catch(() => {});
       throw new AppError('INTERNAL', 500, 'Resource update failed unexpectedly');
     }
-    return updated;
+    return { resource: updated, sensitiveData: result.sensitiveData };
   }
 
   async deprovision(dal: DalFactory, resourceId: string, agentId: string): Promise<Resource> {
