@@ -22,6 +22,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "agentmail": "^0.4.2",
     "dotenv": "^17.3.1",
     "drizzle-orm": "^0.45.1",
     "drizzle-zod": "^0.8.3",
@@ -29,6 +30,7 @@
     "fastify-plugin": "^5.1.0",
     "fastify-type-provider-zod": "^6.1.0",
     "pg": "^8.20.0",
+    "svix": "^1.86.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {

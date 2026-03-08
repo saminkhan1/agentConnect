@@ -13,6 +13,8 @@ const serverEnvSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65535).optional().default(3000),
   HOST: hostSchema.optional().default('0.0.0.0'),
   LOG_LEVEL: logLevelSchema.optional().default('info'),
+  AGENTMAIL_API_KEY: z.string().trim().min(1).optional(),
+  AGENTMAIL_WEBHOOK_SECRET: z.string().trim().min(1).optional(),
 });
 
 const dbEnvSchema = z.object({
