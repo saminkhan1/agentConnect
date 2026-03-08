@@ -50,9 +50,10 @@ export class AgentMailAdapter implements ProviderAdapter {
   }
 
   async deprovision(resource: Resource): Promise<DeprovisionResult> {
-    if (resource.providerRef) {
-      await this.client.inboxes.delete(resource.providerRef);
+    if (!resource.providerRef) {
+      throw new Error(`Resource ${resource.id} has no providerRef`);
     }
+    await this.client.inboxes.delete(resource.providerRef);
     return {};
   }
 
@@ -70,7 +71,7 @@ export class AgentMailAdapter implements ProviderAdapter {
       throw new Error('Resource has no providerRef');
     }
 
-    await this.client.inboxes.messages.send(inboxId, {
+    const result = await this.client.inboxes.messages.send(inboxId, {
       to: payload['to'] as string[] | undefined,
       subject: payload['subject'] as string | undefined,
       text: payload['text'] as string | undefined,
@@ -80,7 +81,7 @@ export class AgentMailAdapter implements ProviderAdapter {
       replyTo: payload['replyTo'] as string | undefined,
     });
 
-    return {};
+    return { message_id: result.messageId };
   }
 
   verifyWebhook(rawBody: Buffer, headers: Record<string, string>): Promise<boolean> {

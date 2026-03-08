@@ -1,2 +1,0 @@
-ALTER TYPE "public"."event_type" ADD VALUE 'email.complained' BEFORE 'payment.card.issued';--> statement-breakpoint
-ALTER TYPE "public"."event_type" ADD VALUE 'email.rejected' BEFORE 'payment.card.issued';

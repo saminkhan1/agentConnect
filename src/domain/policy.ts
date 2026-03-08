@@ -1,3 +1,13 @@
+import { z } from 'zod';
+
+export const resourceConfigSchema = z
+  .object({
+    allowed_domains: z.array(z.string()).optional(),
+    blocked_domains: z.array(z.string()).optional(),
+    max_recipients: z.number().int().positive().optional(),
+  })
+  .loose();
+
 export interface PolicyResult {
   allowed: boolean;
   reasons: string[];
@@ -9,9 +19,14 @@ export function enforceEmailPolicy(
 ): PolicyResult {
   const reasons: string[] = [];
 
-  const allowedDomains = config['allowed_domains'] as string[] | undefined;
-  const blockedDomains = config['blocked_domains'] as string[] | undefined;
-  const maxRecipients = config['max_recipients'] as number | undefined;
+  const allowedDomains = Array.isArray(config['allowed_domains'])
+    ? (config['allowed_domains'] as unknown[]).filter((v): v is string => typeof v === 'string')
+    : undefined;
+  const blockedDomains = Array.isArray(config['blocked_domains'])
+    ? (config['blocked_domains'] as unknown[]).filter((v): v is string => typeof v === 'string')
+    : undefined;
+  const maxRecipients =
+    typeof config['max_recipients'] === 'number' ? config['max_recipients'] : undefined;
 
   const allRecipients = [...(payload.to ?? []), ...(payload.cc ?? []), ...(payload.bcc ?? [])];
 

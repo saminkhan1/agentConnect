@@ -1,3 +1,5 @@
+import crypto from 'node:crypto';
+
 import type { InferSelectModel } from 'drizzle-orm';
 import type { FastifyPluginCallbackZod } from 'fastify-type-provider-zod';
 import fp from 'fastify-plugin';
@@ -62,9 +64,10 @@ const actionsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
         return reply.code(404).send({ message: 'Agent not found' });
       }
 
-      const agentResources = await dal.resources.findByAgentId(agentId);
-      const emailResource = agentResources.find(
-        (r) => r.type === 'email_inbox' && r.state === 'active' && r.provider === 'agentmail',
+      const emailResource = await dal.resources.findActiveByAgentIdAndType(
+        agentId,
+        'email_inbox',
+        'agentmail',
       );
       if (!emailResource) {
         return reply.code(404).send({ message: 'No active agentmail email inbox found for agent' });
@@ -81,7 +84,7 @@ const actionsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
         return reply.code(500).send({ message: 'AgentMail adapter not configured' });
       }
 
-      await adapter.performAction(emailResource, 'send_email', {
+      const actionResult = await adapter.performAction(emailResource, 'send_email', {
         to,
         subject,
         text,
@@ -99,7 +102,7 @@ const actionsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
         eventType: EVENT_TYPES.EMAIL_SENT,
         idempotencyKey: idempotency_key,
         data: {
-          message_id: '',
+          message_id: (actionResult['message_id'] as string) || crypto.randomUUID(),
           from: emailResource.providerRef,
           to,
           subject,

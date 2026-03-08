@@ -1,11 +1,12 @@
 import { z } from 'zod';
 
 import { resourceStateEnum, resourceTypeEnum } from '../../db/schema';
+import { resourceConfigSchema } from '../../domain/policy';
 
 export const createResourceBodySchema = z.object({
   type: z.enum(resourceTypeEnum.enumValues),
   provider: z.string().min(1),
-  config: z.record(z.string(), z.unknown()).optional().default({}),
+  config: resourceConfigSchema.optional().default({}),
 });
 
 export const resourceParamsSchema = z.object({ id: z.string().min(1) });

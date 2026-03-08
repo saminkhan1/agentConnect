@@ -1,5 +1,5 @@
 CREATE TYPE "public"."api_key_type" AS ENUM('root', 'service');--> statement-breakpoint
-CREATE TYPE "public"."event_type" AS ENUM('email.sent', 'email.received', 'email.delivered', 'email.bounced', 'payment.card.issued', 'payment.card.authorized', 'payment.card.declined', 'payment.card.settled');--> statement-breakpoint
+CREATE TYPE "public"."event_type" AS ENUM('email.sent', 'email.received', 'email.delivered', 'email.bounced', 'email.complained', 'email.rejected', 'payment.card.issued', 'payment.card.authorized', 'payment.card.declined', 'payment.card.settled');--> statement-breakpoint
 CREATE TYPE "public"."resource_state" AS ENUM('provisioning', 'active', 'suspended', 'deleted');--> statement-breakpoint
 CREATE TYPE "public"."resource_type" AS ENUM('email_inbox', 'card');--> statement-breakpoint
 CREATE TABLE "agents" (
@@ -52,13 +52,13 @@ CREATE TABLE "resources" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
+CREATE UNIQUE INDEX "agents_org_id_id_unique" ON "agents" USING btree ("org_id","id");--> statement-breakpoint
 ALTER TABLE "agents" ADD CONSTRAINT "agents_org_id_orgs_id_fk" FOREIGN KEY ("org_id") REFERENCES "public"."orgs"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "api_keys" ADD CONSTRAINT "api_keys_org_id_orgs_id_fk" FOREIGN KEY ("org_id") REFERENCES "public"."orgs"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "events" ADD CONSTRAINT "events_org_id_orgs_id_fk" FOREIGN KEY ("org_id") REFERENCES "public"."orgs"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "events" ADD CONSTRAINT "events_org_id_agent_id_agents_org_id_id_fk" FOREIGN KEY ("org_id","agent_id") REFERENCES "public"."agents"("org_id","id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "resources" ADD CONSTRAINT "resources_org_id_orgs_id_fk" FOREIGN KEY ("org_id") REFERENCES "public"."orgs"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "resources" ADD CONSTRAINT "resources_org_id_agent_id_agents_org_id_id_fk" FOREIGN KEY ("org_id","agent_id") REFERENCES "public"."agents"("org_id","id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-CREATE UNIQUE INDEX "agents_org_id_id_unique" ON "agents" USING btree ("org_id","id");--> statement-breakpoint
 CREATE UNIQUE INDEX "events_org_provider_provider_event_id_unique" ON "events" USING btree ("org_id","provider","provider_event_id") WHERE "events"."provider_event_id" is not null;--> statement-breakpoint
 CREATE UNIQUE INDEX "events_org_idempotency_key_unique" ON "events" USING btree ("org_id","idempotency_key") WHERE "events"."idempotency_key" is not null;--> statement-breakpoint
 CREATE INDEX "events_org_agent_occurred_at_idx" ON "events" USING btree ("org_id","agent_id","occurred_at" desc);--> statement-breakpoint

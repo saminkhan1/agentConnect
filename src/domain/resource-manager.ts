@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import type { ProviderAdapter, ProvisionResult, Resource } from '../adapters/provider-adapter';
 import type { DalFactory } from '../db/dal';
 import { AppError } from './errors';
+import { resourceConfigSchema } from './policy';
 
 export class ResourceManager {
   constructor(private readonly adapters: Map<string, ProviderAdapter>) {}
@@ -42,12 +43,21 @@ export class ResourceManager {
       throw err;
     }
 
+    const mergedConfig = { ...config, ...(result.config ?? {}) };
+    const parsedConfig = resourceConfigSchema.safeParse(mergedConfig);
+    if (!parsedConfig.success) {
+      throw new AppError(
+        'INTERNAL',
+        500,
+        `Adapter '${provider}' returned invalid config: ${parsedConfig.error.message}`,
+      );
+    }
     const updated = await dal.resources.updateById(id, {
       providerRef: result.providerRef,
-      config: { ...config, ...(result.config ?? {}) },
+      config: parsedConfig.data,
       state: 'active',
     });
-    if (!updated) throw new Error('Resource update failed unexpectedly');
+    if (!updated) throw new AppError('INTERNAL', 500, 'Resource update failed unexpectedly');
     return updated;
   }
 
@@ -61,7 +71,7 @@ export class ResourceManager {
     await adapter.deprovision(resource);
 
     const updated = await dal.resources.updateById(resourceId, { state: 'deleted' });
-    if (!updated) throw new Error('Resource update failed unexpectedly');
+    if (!updated) throw new AppError('INTERNAL', 500, 'Resource update failed unexpectedly');
     return updated;
   }
 }

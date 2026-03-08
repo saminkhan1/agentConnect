@@ -130,6 +130,11 @@ function installAgentsDalMock(methods: { findById?: (id: string) => Promise<Agen
 }
 
 function installResourcesDalMock(methods: {
+  findActiveByAgentIdAndType?: (
+    agentId: string,
+    type: string,
+    provider: string,
+  ) => Promise<ResourceRecord | null>;
   findByAgentId?: (agentId: string) => Promise<ResourceRecord[]>;
 }) {
   const originalDescriptor = Object.getOwnPropertyDescriptor(DalFactory.prototype, 'resources');
@@ -221,7 +226,7 @@ void test('POST /agents/:id/actions/send_email returns 404 when no active agentm
 
   const restoreAgents = installAgentsDalMock({ findById: (_id) => Promise.resolve(agent) });
   const restoreResources = installResourcesDalMock({
-    findByAgentId: (_agentId) => Promise.resolve([]),
+    findActiveByAgentIdAndType: (_agentId, _type, _provider) => Promise.resolve(null),
   });
 
   try {
@@ -249,7 +254,7 @@ void test('POST /agents/:id/actions/send_email returns 403 when policy blocks re
 
   const restoreAgents = installAgentsDalMock({ findById: (_id) => Promise.resolve(agent) });
   const restoreResources = installResourcesDalMock({
-    findByAgentId: (_agentId) => Promise.resolve([resource]),
+    findActiveByAgentIdAndType: (_agentId, _type, _provider) => Promise.resolve(resource),
   });
 
   try {
@@ -283,7 +288,7 @@ void test('POST /agents/:id/actions/send_email returns 200 and emits email.sent 
 
   const restoreAgents = installAgentsDalMock({ findById: (_id) => Promise.resolve(agent) });
   const restoreResources = installResourcesDalMock({
-    findByAgentId: (_agentId) => Promise.resolve([resource]),
+    findActiveByAgentIdAndType: (_agentId, _type, _provider) => Promise.resolve(resource),
   });
   const restoreAdapter = installAgentMailAdapterMock(server, {
     performAction: (_resource, _action, payload) => {

@@ -211,6 +211,27 @@ export class ResourceDal {
       );
   }
 
+  async findActiveByAgentIdAndType(
+    agentId: string,
+    type: ResourceRecord['type'],
+    provider: string,
+  ): Promise<ResourceRecord | null> {
+    const result = await db
+      .select()
+      .from(resources)
+      .where(
+        and(
+          eq(resources.orgId, this.orgId),
+          eq(resources.agentId, agentId),
+          eq(resources.type, type),
+          eq(resources.provider, provider),
+          eq(resources.state, 'active'),
+        ),
+      )
+      .limit(1);
+    return result[0] ?? null;
+  }
+
   async insert(data: Omit<NewResource, 'orgId'>): Promise<ResourceRecord> {
     const result = await db
       .insert(resources)

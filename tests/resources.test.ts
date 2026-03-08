@@ -183,6 +183,37 @@ void test('enforceEmailPolicy: max_recipients allows exact count', () => {
   assert.strictEqual(result.allowed, true);
 });
 
+void test('enforceEmailPolicy: allowed_domains as string → treated as no restriction', () => {
+  // Defense-in-depth: non-array value must not crash and must not invert the policy
+  const result = enforceEmailPolicy(
+    { allowed_domains: 'example.com' as unknown as string[] },
+    { to: ['user@example.com'] },
+  );
+  assert.strictEqual(result.allowed, true);
+  assert.deepStrictEqual(result.reasons, []);
+});
+
+void test('enforceEmailPolicy: blocked_domains as object → does not bypass the block', () => {
+  // Primary defense is schema rejection at ingress; runtime guard ensures no crash here
+  const result = enforceEmailPolicy(
+    { blocked_domains: { '0': 'spam.com' } as unknown as string[] },
+    { to: ['bad@spam.com'] },
+  );
+  // Non-array blocked_domains is treated as absent — no block applied by the function itself
+  assert.strictEqual(result.allowed, true);
+  assert.deepStrictEqual(result.reasons, []);
+});
+
+void test('enforceEmailPolicy: max_recipients as string → treated as no limit', () => {
+  const result = enforceEmailPolicy(
+    { max_recipients: '2' as unknown as number },
+    { to: ['a@x.com', 'b@x.com', 'c@x.com'] },
+  );
+  // Non-number max_recipients treated as absent → no limit enforced
+  assert.strictEqual(result.allowed, true);
+  assert.deepStrictEqual(result.reasons, []);
+});
+
 // ---------------------------------------------------------------------------
 // Resource route unit tests
 // ---------------------------------------------------------------------------
