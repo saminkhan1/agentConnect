@@ -4,6 +4,7 @@ import Fastify from 'fastify';
 import type { FastifyError } from 'fastify';
 import { serializerCompiler, validatorCompiler, ZodTypeProvider } from 'fastify-type-provider-zod';
 
+import actionsRoutes from './routes/actions';
 import agentsRoutes from './routes/agents';
 import eventsRoutes from './routes/events';
 import healthRoutes from './routes/health';
@@ -59,6 +60,7 @@ export async function buildServer() {
   await server.register(agentsRoutes);
   await server.register(eventsRoutes);
   await server.register(resourceRoutes);
+  await server.register(actionsRoutes);
 
   return server;
 }
