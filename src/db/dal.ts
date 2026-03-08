@@ -1,17 +1,19 @@
-import { and, desc, eq, gte, InferInsertModel, lt, lte, or } from 'drizzle-orm';
+import { and, desc, eq, gte, InferInsertModel, lt, lte, ne, or } from 'drizzle-orm';
 
 import { db } from './index';
-import { agents, apiKeys, events, orgs } from './schema';
+import { agents, apiKeys, events, orgs, resources } from './schema';
 import type { EventType } from '../domain/events';
 
 type NewAgent = InferInsertModel<typeof agents>;
 type NewApiKey = InferInsertModel<typeof apiKeys>;
 type NewEvent = InferInsertModel<typeof events>;
 type NewOrg = InferInsertModel<typeof orgs>;
+type NewResource = InferInsertModel<typeof resources>;
 type AgentRecord = typeof agents.$inferSelect;
 type OrgRecord = typeof orgs.$inferSelect;
 type ApiKeyRecord = typeof apiKeys.$inferSelect;
 type EventRecord = typeof events.$inferSelect;
+type ResourceRecord = typeof resources.$inferSelect;
 
 type EventCursor = {
   occurredAt: Date;
@@ -180,6 +182,56 @@ export class EventDal {
   }
 }
 
+export class ResourceDal {
+  private readonly orgId: string;
+
+  constructor(orgId: string) {
+    this.orgId = requireOrgId(orgId);
+  }
+
+  async findById(id: string): Promise<ResourceRecord | null> {
+    const result = await db
+      .select()
+      .from(resources)
+      .where(and(eq(resources.orgId, this.orgId), eq(resources.id, id)))
+      .limit(1);
+    return result[0] || null;
+  }
+
+  async findByAgentId(agentId: string): Promise<ResourceRecord[]> {
+    return db
+      .select()
+      .from(resources)
+      .where(
+        and(
+          eq(resources.orgId, this.orgId),
+          eq(resources.agentId, agentId),
+          ne(resources.state, 'deleted'),
+        ),
+      );
+  }
+
+  async insert(data: Omit<NewResource, 'orgId'>): Promise<ResourceRecord> {
+    const result = await db
+      .insert(resources)
+      .values({ ...data, orgId: this.orgId })
+      .returning();
+    return result[0];
+  }
+
+  async updateById(
+    id: string,
+    data: Partial<Omit<NewResource, 'orgId' | 'id'>>,
+  ): Promise<ResourceRecord | null> {
+    const result = await db
+      .update(resources)
+      .set({ ...data, updatedAt: new Date() })
+      .where(and(eq(resources.orgId, this.orgId), eq(resources.id, id)))
+      .returning();
+    return result[0] || null;
+  }
+}
+
 export class DalFactory {
   private readonly orgId: string;
 
@@ -197,6 +249,10 @@ export class DalFactory {
 
   get events() {
     return new EventDal(this.orgId);
+  }
+
+  get resources() {
+    return new ResourceDal(this.orgId);
   }
 }
 
