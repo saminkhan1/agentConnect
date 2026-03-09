@@ -81,7 +81,10 @@ export class AgentMailAdapter implements ProviderAdapter {
       replyTo: payload['replyTo'] as string | undefined,
     });
 
-    return { message_id: result.messageId };
+    return {
+      message_id: result.messageId,
+      thread_id: result.threadId,
+    };
   }
 
   verifyWebhook(rawBody: Buffer, headers: Record<string, string>): Promise<boolean> {

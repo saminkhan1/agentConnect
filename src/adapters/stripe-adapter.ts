@@ -31,6 +31,7 @@ type StripeTransactionObject = {
   amount: number;
   currency: string;
   authorization: string | { id: string } | null;
+  type?: 'capture' | 'refund';
 };
 
 export class StripeAdapter implements ProviderAdapter {
@@ -214,8 +215,9 @@ export class StripeAdapter implements ProviderAdapter {
           data: {
             transaction_id: txn.id,
             ...(authorizationId !== undefined ? { authorization_id: authorizationId } : {}),
-            amount: Math.abs(txn.amount),
+            amount: txn.amount,
             currency: txn.currency.toUpperCase(),
+            ...(txn.type ? { transaction_type: txn.type } : {}),
           },
         },
       ]);

@@ -48,7 +48,7 @@ function decodeCursor(cursor: string): { occurredAt: Date; id: string } | null {
   }
 }
 
-function serializeEvent(event: EventRecord) {
+export function serializeEvent(event: EventRecord) {
   return {
     id: event.id,
     orgId: event.orgId,

@@ -19,28 +19,15 @@ import { requireScope } from '../../plugins/auth';
 import { enforceEmailPolicy } from '../../domain/policy';
 import { redactSensitive } from '../../domain/redact';
 import { EVENT_TYPES } from '../../domain/events';
+import { serializeEvent } from './events';
 import { serializeResource } from './resources';
 
 type EventRecord = InferSelectModel<typeof eventsTable>;
 type ResourceRecord = InferSelectModel<typeof resourcesTable>;
 
 const MSG_IDEMPOTENCY_DIFFERENT_ACTION = 'Idempotency key already used for a different action';
-
-function serializeEvent(e: EventRecord) {
-  return {
-    id: e.id,
-    orgId: e.orgId,
-    agentId: e.agentId,
-    resourceId: e.resourceId,
-    provider: e.provider,
-    providerEventId: e.providerEventId,
-    eventType: e.eventType,
-    occurredAt: e.occurredAt.toISOString(),
-    idempotencyKey: e.idempotencyKey,
-    data: e.data,
-    ingestedAt: e.ingestedAt.toISOString(),
-  };
-}
+const MSG_IDEMPOTENCY_DIFFERENT_EMAIL =
+  'Idempotency key already used with different email parameters';
 
 function buildIdempotentCardResourceId(orgId: string, idempotencyKey: string) {
   const digest = crypto
@@ -77,9 +64,41 @@ function normalizeStringArray(value: unknown) {
     .sort((left, right) => left.localeCompare(right));
 }
 
+function normalizeOptionalString(value: unknown) {
+  return typeof value === 'string' ? value : '';
+}
+
+function buildSendEmailRequestHash(
+  resource: ResourceRecord,
+  payload: {
+    to: string[];
+    subject: string;
+    text: string;
+    html?: string;
+    cc?: string[];
+    bcc?: string[];
+    reply_to?: string;
+  },
+) {
+  return crypto
+    .createHash('sha256')
+    .update(
+      JSON.stringify({
+        from: resource.providerRef ?? '',
+        to: normalizeStringArray(payload.to),
+        cc: normalizeStringArray(payload.cc),
+        bcc: normalizeStringArray(payload.bcc),
+        subject: payload.subject,
+        text: payload.text,
+        html: normalizeOptionalString(payload.html),
+        reply_to: normalizeOptionalString(payload.reply_to),
+      }),
+    )
+    .digest('hex');
+}
+
 function normalizeCardIssuanceConfig(config: Record<string, unknown>) {
   return {
-    billing_name: typeof config['billing_name'] === 'string' ? config['billing_name'] : '',
     spending_limits: normalizeSpendingLimits(config['spending_limits']),
     allowed_categories: normalizeStringArray(config['allowed_categories']),
     allowed_merchant_countries: normalizeStringArray(config['allowed_merchant_countries']),
@@ -104,6 +123,14 @@ function isStripeCardResourceForAgent(resource: ResourceRecord, agentId: string)
 function isIssuedCardEventForResource(event: EventRecord, agentId: string, resourceId: string) {
   return (
     event.eventType === EVENT_TYPES.PAYMENT_CARD_ISSUED &&
+    event.agentId === agentId &&
+    event.resourceId === resourceId
+  );
+}
+
+function isSentEmailEventForResource(event: EventRecord, agentId: string, resourceId: string) {
+  return (
+    event.eventType === EVENT_TYPES.EMAIL_SENT &&
     event.agentId === agentId &&
     event.resourceId === resourceId
   );
@@ -180,6 +207,7 @@ const actionsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
         response: {
           200: sendEmailResponseSchema,
           401: errorResponseSchema,
+          409: errorResponseSchema,
           403: errorResponseSchema,
           404: errorResponseSchema,
           500: errorResponseSchema,
@@ -215,6 +243,35 @@ const actionsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
         return reply.code(403).send({ message: policyResult.reasons.join('; ') });
       }
 
+      const requestHash = buildSendEmailRequestHash(emailResource, {
+        to,
+        subject,
+        text,
+        html,
+        cc,
+        bcc,
+        reply_to,
+      });
+
+      if (idempotency_key) {
+        const existingEvent = await dal.events.findByIdempotencyKey(idempotency_key);
+        if (existingEvent) {
+          if (!isSentEmailEventForResource(existingEvent, agentId, emailResource.id)) {
+            return reply.code(409).send({ message: MSG_IDEMPOTENCY_DIFFERENT_ACTION });
+          }
+
+          const existingRequestHash =
+            typeof existingEvent.data['request_hash'] === 'string'
+              ? existingEvent.data['request_hash']
+              : null;
+          if (existingRequestHash && existingRequestHash !== requestHash) {
+            return reply.code(409).send({ message: MSG_IDEMPOTENCY_DIFFERENT_EMAIL });
+          }
+
+          return reply.code(200).send({ event: serializeEvent(existingEvent) });
+        }
+      }
+
       const adapter = server.agentMailAdapter;
       if (!adapter) {
         return reply.code(500).send({ message: 'AgentMail adapter not configured' });
@@ -239,9 +296,15 @@ const actionsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
         idempotencyKey: idempotency_key,
         data: {
           message_id: (actionResult['message_id'] as string) || '',
+          ...(typeof actionResult['thread_id'] === 'string'
+            ? { thread_id: actionResult['thread_id'] }
+            : {}),
           from: emailResource.providerRef,
           to,
+          ...(cc ? { cc } : {}),
+          ...(bcc ? { bcc } : {}),
           subject,
+          request_hash: requestHash,
         },
       });
 
@@ -282,10 +345,6 @@ const actionsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
       const agent = await dal.agents.findById(agentId);
       if (!agent || agent.isArchived) {
         return reply.code(404).send({ message: 'Agent not found' });
-      }
-
-      if (!server.stripeAdapter) {
-        return reply.code(500).send({ message: 'Stripe adapter not configured' });
       }
 
       const { spending_limits, allowed_categories, allowed_merchant_countries, idempotency_key } =
@@ -342,6 +401,10 @@ const actionsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
             }
           }
         }
+      }
+
+      if (!server.stripeAdapter) {
+        return reply.code(500).send({ message: 'Stripe adapter not configured' });
       }
 
       const { resource, sensitiveData, reusedExisting } = await server.resourceManager.provision(

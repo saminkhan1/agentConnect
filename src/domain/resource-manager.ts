@@ -24,6 +24,23 @@ function isUniqueViolation(error: unknown): boolean {
   );
 }
 
+async function cleanupProvisionedResource(
+  adapter: ProviderAdapter,
+  resource: Resource,
+  result: ProvisionResult,
+  config: Record<string, unknown>,
+): Promise<void> {
+  await adapter
+    .deprovision({
+      ...resource,
+      providerRef: result.providerRef,
+      providerOrgId: result.providerOrgId ?? null,
+      config,
+      state: 'active',
+    })
+    .catch(() => {});
+}
+
 export class ResourceManager {
   constructor(private readonly adapters: Map<string, ProviderAdapter>) {}
 
@@ -45,6 +62,7 @@ export class ResourceManager {
   ): Promise<ProvisionOutcome> {
     const adapter = this.getAdapter(provider);
     const id = options?.resourceId ?? `res_${crypto.randomUUID()}`;
+    let provisioningResource: Resource;
 
     const existing = options?.resourceId ? await dal.resources.findById(id) : null;
     if (existing) {
@@ -61,9 +79,10 @@ export class ResourceManager {
       if (!reset) {
         throw new AppError('INTERNAL', 500, 'Failed to reset idempotent resource state');
       }
+      provisioningResource = reset;
     } else {
       try {
-        await dal.resources.insert({
+        provisioningResource = await dal.resources.insert({
           id,
           agentId,
           type,
@@ -94,6 +113,7 @@ export class ResourceManager {
     const mergedConfig = { ...config, ...(result.config ?? {}) };
     const parsedConfig = resourceConfigSchema.safeParse(mergedConfig);
     if (!parsedConfig.success) {
+      await cleanupProvisionedResource(adapter, provisioningResource, result, mergedConfig);
       await dal.resources.updateById(id, { state: 'deleted' }).catch(() => {});
       throw new AppError(
         'INTERNAL',
@@ -111,11 +131,13 @@ export class ResourceManager {
         state: 'active',
       });
     } catch (updateErr) {
+      await cleanupProvisionedResource(adapter, provisioningResource, result, parsedConfig.data);
       await dal.resources.updateById(id, { state: 'deleted' }).catch(() => {});
       throw updateErr;
     }
 
     if (!updated) {
+      await cleanupProvisionedResource(adapter, provisioningResource, result, parsedConfig.data);
       await dal.resources.updateById(id, { state: 'deleted' }).catch(() => {});
       throw new AppError('INTERNAL', 500, 'Resource update failed unexpectedly');
     }

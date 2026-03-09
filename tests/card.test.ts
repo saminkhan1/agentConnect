@@ -5,9 +5,9 @@ import test from 'node:test';
 import { buildServer } from '../src/api/server';
 import { DalFactory, systemDal } from '../src/db/dal';
 import type { EventWriter, WriteEventResult } from '../src/domain/event-writer';
-import type { ResourceManager } from '../src/domain/resource-manager';
 import { StripeAdapter } from '../src/adapters/stripe-adapter';
 import type { ParsedWebhookEvent } from '../src/adapters/provider-adapter';
+import { ResourceManager } from '../src/domain/resource-manager';
 import {
   FIXED_TIMESTAMP,
   ResourceRecord,
@@ -380,6 +380,74 @@ void test('POST /agents/:id/actions/issue_card replays an existing issuance for 
   }
 });
 
+void test('POST /agents/:id/actions/issue_card replays after an agent rename without requiring Stripe config', async () => {
+  const server = await buildServer();
+  const { authorizationHeader, restore } = await installAuthApiKey(server);
+  const currentAgent = buildAgentRecord({ name: 'concierge-agent-renamed' });
+  const resource = buildCardResourceRecord({
+    config: {
+      billing_name: 'concierge-agent',
+      spending_limits: [{ amount: 5000, interval: 'per_authorization' }],
+      cardholder_id: 'ich_test',
+      last4: '4242',
+      exp_month: 12,
+      exp_year: 2027,
+    },
+  });
+  const fakeEvent = buildFakeCardEventRecord({
+    resourceId: resource.id,
+    idempotencyKey: 'idem-card-rename',
+  });
+
+  let provisionCalls = 0;
+
+  const restoreAgents = installAgentsDalMock({ findById: () => Promise.resolve(currentAgent) });
+  const restoreEvents = installEventsDalMock({
+    findByIdempotencyKey: () => Promise.resolve(fakeEvent),
+  });
+  const restoreResources = installResourcesDalMock({
+    findById: () => Promise.resolve(resource),
+  });
+  const originalAdapter = server.stripeAdapter;
+  server.stripeAdapter = undefined;
+  const restoreRM = installResourceManagerMock(server, {
+    provision: () => {
+      provisionCalls += 1;
+      return Promise.resolve({ resource });
+    },
+  });
+
+  try {
+    const response = await server.inject({
+      method: 'POST',
+      url: '/agents/agt_123/actions/issue_card',
+      headers: { authorization: authorizationHeader },
+      payload: {
+        spending_limits: [{ amount: 5000, interval: 'per_authorization' }],
+        idempotency_key: 'idem-card-rename',
+      },
+    });
+
+    assert.strictEqual(response.statusCode, 200);
+    assert.strictEqual(provisionCalls, 0);
+
+    const body = JSON.parse(response.payload) as {
+      resource: { id: string };
+      event: { idempotencyKey: string | null };
+    };
+    assert.strictEqual(body.resource.id, resource.id);
+    assert.strictEqual(body.event.idempotencyKey, 'idem-card-rename');
+  } finally {
+    server.stripeAdapter = originalAdapter;
+    restore();
+    restoreAgents();
+    restoreEvents();
+    restoreResources();
+    restoreRM();
+    await server.close();
+  }
+});
+
 void test('POST /agents/:id/actions/issue_card returns 409 when an org key is already tied to another agent', async () => {
   const server = await buildServer();
   const { authorizationHeader, restore } = await installAuthApiKey(server);
@@ -505,7 +573,6 @@ void test('POST /agents/:id/actions/issue_card: resource config does not contain
       headers: { authorization: authorizationHeader },
       payload: {
         spending_limits: [{ amount: 5000, interval: 'per_authorization' }],
-        idempotency_key: 'idem-card-001',
       },
     });
 
@@ -633,6 +700,135 @@ void test('StripeAdapter.deprovision cancels cards and deactivates cardholders',
     { target: 'card', id: 'ic_test123', payload: { status: 'canceled' } },
     { target: 'cardholder', id: 'ich_test', payload: { status: 'inactive' } },
   ]);
+});
+
+void test('ResourceManager.provision deprovisions a Stripe card when DB activation fails', async () => {
+  const adapterCalls: Array<{ kind: 'provision' | 'deprovision'; resource?: ResourceRecord }> = [];
+  const adapter = {
+    providerName: 'stripe' as const,
+    provision: () => {
+      adapterCalls.push({ kind: 'provision' });
+      return Promise.resolve({
+        providerRef: 'ic_test123',
+        config: {
+          cardholder_id: 'ich_test',
+          last4: '4242',
+          exp_month: 12,
+          exp_year: 2027,
+        },
+      });
+    },
+    deprovision: (resource: ResourceRecord) => {
+      adapterCalls.push({ kind: 'deprovision', resource });
+      return Promise.resolve({});
+    },
+    performAction: () => Promise.resolve({}),
+    verifyWebhook: () => Promise.resolve(true),
+    parseWebhook: () => Promise.resolve([]),
+  };
+  const resourceManager = new ResourceManager(new Map([['stripe', adapter]]));
+  let activeUpdateAttempted = false;
+
+  const dal = {
+    resources: {
+      findById: () => Promise.resolve(null),
+      insert: (data: Record<string, unknown>) =>
+        Promise.resolve(
+          buildCardResourceRecord({
+            id: data['id'] as string,
+            providerRef: null,
+            providerOrgId: null,
+            config: data['config'] as Record<string, unknown>,
+            state: 'provisioning',
+          }),
+        ),
+      updateById: (_id: string, data: Record<string, unknown>) => {
+        if (data['state'] === 'active' && !activeUpdateAttempted) {
+          activeUpdateAttempted = true;
+          return Promise.reject(new Error('db write failed'));
+        }
+
+        const providerRef = typeof data['providerRef'] === 'string' ? data['providerRef'] : null;
+        const providerOrgId =
+          typeof data['providerOrgId'] === 'string' ? data['providerOrgId'] : null;
+        const config =
+          typeof data['config'] === 'object' && data['config'] !== null
+            ? (data['config'] as Record<string, unknown>)
+            : {};
+        const state = data['state'];
+
+        return Promise.resolve(
+          buildCardResourceRecord({
+            providerRef,
+            providerOrgId,
+            config,
+            state:
+              state === 'provisioning' ||
+              state === 'active' ||
+              state === 'suspended' ||
+              state === 'deleted'
+                ? state
+                : 'active',
+          }),
+        );
+      },
+    },
+  } as unknown as DalFactory;
+
+  await assert.rejects(() =>
+    resourceManager.provision(
+      dal,
+      'agt_123',
+      'card',
+      'stripe',
+      {
+        billing_name: 'Agent One',
+        spending_limits: [{ amount: 5000, interval: 'per_authorization' }],
+      },
+      { resourceId: 'res_card_rollback' },
+    ),
+  );
+
+  assert.deepStrictEqual(
+    adapterCalls.map((call) => call.kind),
+    ['provision', 'deprovision'],
+  );
+  const deprovisionCall = adapterCalls[1];
+  assert.strictEqual(deprovisionCall.kind, 'deprovision');
+  assert.ok(deprovisionCall.resource);
+  assert.strictEqual(deprovisionCall.resource.providerRef, 'ic_test123');
+  assert.strictEqual(deprovisionCall.resource.config['cardholder_id'], 'ich_test');
+});
+
+void test('StripeAdapter.parseWebhook preserves refund sign and type metadata', async () => {
+  const adapter = new StripeAdapter('sk_test_123', 'whsec_test_123');
+  const payload = JSON.stringify({
+    id: 'evt_refund_001',
+    type: 'issuing_transaction.created',
+    created: Math.floor(FIXED_TIMESTAMP.getTime() / 1000),
+    data: {
+      object: {
+        id: 'ipi_refund_001',
+        card: 'ic_test123',
+        amount: -5000,
+        currency: 'usd',
+        authorization: 'iauth_001',
+        type: 'refund',
+      },
+    },
+  });
+
+  const [event] = await adapter.parseWebhook(Buffer.from(payload), {});
+  assert.ok(event);
+  assert.strictEqual(event.eventType, 'payment.card.settled');
+  assert.strictEqual(event.resourceRef, 'ic_test123');
+  assert.deepStrictEqual(event.data, {
+    transaction_id: 'ipi_refund_001',
+    authorization_id: 'iauth_001',
+    amount: -5000,
+    currency: 'USD',
+    transaction_type: 'refund',
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -1,764 +1,878 @@
 #!/usr/bin/env bash
-# ══════════════════════════════════════════════════════════════════════════════
-#  AgentConnect v0.3.0 — End-to-End Demo
+# AgentConnect Phase D demo
 #
-#  Story: "You give each AI agent an identity. We provision real email inboxes,
-#  enforce your org's send policy, and every action becomes a canonical,
-#  queryable event log. One API. Multi-tenant. Production-hardened auth."
+# Story:
+#   One agent identity can own multiple real-world rails. In this demo a single
+#   agent gets an email inbox and a virtual card, produces canonical events on
+#   both rails, and ends with a unified timeline query.
 #
-#  Covers:
-#    ✦ Happy path  (org → agents → inboxes → send → event log)
-#    ✦ Policy enforcement (blocked_domains, max_recipients, allowed_domains)
-#    ✦ Auth & permission errors (no auth, bad key, wrong scope)
-#    ✦ Validation errors (Zod ingress rejection)
-#    ✦ Tenant isolation (cross-org data walls)
-#    ✦ Idempotency (exactly-once event delivery)
-#    ✦ Cursor-paged event log (filter by type, paginate)
-#    ✦ Agent archival + resource deprovisioning
+# Full local demo:
+#   source .env
+#   npm run dev
+#   source .env
+#   ./demo.sh
 #
-#  Reusable runs:
-#    State (org, agents, inboxes) is saved to .demo-state after the first run.
-#    Subsequent runs load that state and skip provisioning — staying within the
-#    3-inbox limit of the AgentMail free plan.
-#    Delete .demo-state to force a fully fresh run.
-#
-#  Usage:  ./demo.sh [BASE_URL]
-#  Prereq: curl, jq
-#
-#  Start server first:
-#    AGENTMAIL_API_KEY=<key> AGENTMAIL_WEBHOOK_SECRET=<secret> npm run dev
-# ══════════════════════════════════════════════════════════════════════════════
+# Notes:
+#   - AgentMail must be configured on the server for the email path.
+#   - Card issuance uses the server's configured Stripe adapter.
+#   - If STRIPE_WEBHOOK_SECRET is exported in this shell, the script also
+#     simulates signed Stripe authorization and settlement webhooks.
+#   - Set DEMO_SKIP_CARD=1 to run an email-only version.
 
 BASE_URL="${1:-${BASE_URL:-http://localhost:3000}}"
 STATE_FILE="${STATE_FILE:-.demo-state}"
+STATE_VERSION="phase-d-v1"
+RUN_TAG="${RUN_TAG:-$(date '+%Y%m%d-%H%M%S')}"
 
-# ── ANSI ──────────────────────────────────────────────────────────────────────
-RED='\033[0;31m';  GREEN='\033[0;32m';  YELLOW='\033[1;33m'
-BLUE='\033[0;34m'; CYAN='\033[0;36m';   BOLD='\033[1m'
-DIM='\033[2m';     NC='\033[0m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
 
-PASS_COUNT=0; FAIL_COUNT=0
+PASS_COUNT=0
+FAIL_COUNT=0
+SKIP_COUNT=0
+SKIP_NOTES=()
 
-pass()  { echo -e "  ${GREEN}✓${NC}  $*";  PASS_COUNT=$((PASS_COUNT + 1)); }
-fail()  { echo -e "  ${RED}✗${NC}  $*";   FAIL_COUNT=$((FAIL_COUNT + 1)); }
-info()  { echo -e "  ${DIM}    $*${NC}"; }
-step()  { echo -e "\n  ${CYAN}▶  $*${NC}"; }
-abort() { echo -e "\n  ${RED}FATAL: $*${NC}\n"; exit 1; }
+pass() {
+  echo -e "  ${GREEN}[OK]${NC} $*"
+  PASS_COUNT=$((PASS_COUNT + 1))
+}
+
+fail() {
+  echo -e "  ${RED}[FAIL]${NC} $*"
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+}
+
+skip() {
+  echo -e "  ${YELLOW}[SKIP]${NC} $*"
+  SKIP_COUNT=$((SKIP_COUNT + 1))
+  SKIP_NOTES+=("$*")
+}
+
+warn() {
+  echo -e "  ${YELLOW}[WARN]${NC} $*"
+}
+
+info() {
+  echo -e "  ${DIM}$*${NC}"
+}
+
+step() {
+  echo -e "\n  ${CYAN}>${NC} $*"
+}
+
+abort() {
+  echo -e "\n${RED}FATAL:${NC} $*\n"
+  exit 1
+}
 
 section() {
   echo ""
-  echo -e "${BOLD}${BLUE}══════════════════════════════════════════════════════════════${NC}"
-  printf "${BOLD}${BLUE}  [%02d] %s${NC}\n" "$1" "$2"
-  echo -e "${BOLD}${BLUE}══════════════════════════════════════════════════════════════${NC}"
+  echo -e "${BOLD}${BLUE}------------------------------------------------------------${NC}"
+  echo -e "${BOLD}${BLUE}$1${NC}"
+  echo -e "${BOLD}${BLUE}------------------------------------------------------------${NC}"
+}
+
+mask() {
+  local value="$1"
+  if [[ -z "$value" || "$value" == "null" ]]; then
+    echo "null"
+    return
+  fi
+
+  if [[ "${#value}" -le 12 ]]; then
+    echo "${value:0:4}..."
+    return
+  fi
+
+  echo "${value:0:10}..."
 }
 
 json_peek() {
-  # Print first 10 lines of JSON, indented and dimmed
   echo "$1" | jq '.' 2>/dev/null | head -10 | while IFS= read -r line; do
-    echo -e "  ${DIM}    ${line}${NC}"
+    echo -e "  ${DIM}${line}${NC}"
   done
 }
 
-# ── HTTP client ───────────────────────────────────────────────────────────────
-_TMP=$(mktemp)
+jq_r() {
+  echo "$1" | jq -r "$2" 2>/dev/null
+}
+
+require_var() {
+  if [[ -z "$2" || "$2" == "null" ]]; then
+    abort "Could not extract $1 from the last response"
+  fi
+}
+
+is_truthy() {
+  case "$1" in
+    1 | true | TRUE | yes | YES)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+active_resource_present() {
+  echo "$1" | jq -e --arg rid "$2" '.resources[]? | select(.id == $rid and .state == "active")' \
+    >/dev/null 2>&1
+}
+
+_TMP="$(mktemp)"
 trap 'rm -f "$_TMP"' EXIT
 
 HTTP_STATUS=""
 HTTP_BODY=""
 
-call() {
-  # call <METHOD> <PATH> [AUTH_TOKEN] [JSON_BODY]
-  local method="$1" path="$2" auth="${3:-}" body="${4:-}"
-  local -a args=(-s -o "$_TMP" -w "%{http_code}"
-                 -X "$method" "${BASE_URL}${path}")
-  [[ -n "$auth" ]] && args+=(-H "Authorization: Bearer $auth")
+call_raw() {
+  local method="$1"
+  local path="$2"
+  local body="${3:-}"
+  shift 3 || true
+
+  local -a args=(
+    -s
+    -o "$_TMP"
+    -w "%{http_code}"
+    -X "$method"
+    "${BASE_URL}${path}"
+  )
+
+  while [[ "$#" -gt 0 ]]; do
+    args+=(-H "$1")
+    shift
+  done
+
   if [[ -n "$body" ]]; then
-    args+=(-H "Content-Type: application/json" -d "$body")
+    args+=(--data "$body")
   fi
-  HTTP_STATUS=$(curl "${args[@]}" 2>/dev/null || echo "000")
-  HTTP_BODY=$(cat "$_TMP" 2>/dev/null || echo "{}")
+
+  HTTP_STATUS="$(curl "${args[@]}" 2>/dev/null || echo "000")"
+  HTTP_BODY="$(cat "$_TMP" 2>/dev/null || echo "{}")"
+}
+
+call() {
+  local method="$1"
+  local path="$2"
+  local auth="${3:-}"
+  local body="${4:-}"
+
+  if [[ -n "$body" && -n "$auth" ]]; then
+    call_raw "$method" "$path" "$body" \
+      "Authorization: Bearer $auth" \
+      "Content-Type: application/json"
+  elif [[ -n "$body" ]]; then
+    call_raw "$method" "$path" "$body" "Content-Type: application/json"
+  elif [[ -n "$auth" ]]; then
+    call_raw "$method" "$path" "" "Authorization: Bearer $auth"
+  else
+    call_raw "$method" "$path" ""
+  fi
 }
 
 assert_http() {
-  # assert_http <label> <expected_status>
-  if [[ "$HTTP_STATUS" == "$2" ]]; then
-    pass "HTTP ${HTTP_STATUS} — $1"
+  local label="$1"
+  local expected="$2"
+  if [[ "$HTTP_STATUS" == "$expected" ]]; then
+    pass "HTTP $HTTP_STATUS - $label"
   else
-    fail "HTTP ${HTTP_STATUS} (expected $2) — $1"
-    local msg; msg=$(echo "$HTTP_BODY" | jq -r '.message // empty' 2>/dev/null)
-    [[ -n "$msg" ]] && info "→ $msg"
+    fail "HTTP $HTTP_STATUS (expected $expected) - $label"
+    local message
+    message="$(jq_r "$HTTP_BODY" '.message // empty')"
+    if [[ -n "$message" ]]; then
+      info "message: $message"
+    fi
   fi
 }
 
 assert_contains() {
-  # assert_contains <label> <haystack> <needle>
-  if echo "$2" | grep -qi "$3" 2>/dev/null; then
-    pass "$1"
+  local label="$1"
+  local haystack="$2"
+  local needle="$3"
+  if echo "$haystack" | grep -qi "$needle" 2>/dev/null; then
+    pass "$label"
   else
-    fail "$1 (expected to contain: '$3', got: '$2')"
+    fail "$label (expected to contain '$needle')"
   fi
 }
 
-jq_r() { echo "$1" | jq -r "$2" 2>/dev/null; }
-
-require_var() {
-  # require_var <label> <value>
-  if [[ -z "$2" || "$2" == "null" ]]; then
-    abort "Could not extract $1 — check server output above"
-  fi
+reset_state() {
+  ORG_ID=""
+  ROOT_KEY=""
+  SERVICE_KEY=""
+  AGENT_CONCIERGE=""
+  AGENT_APPROVER=""
+  CONCIERGE_EMAIL_RESOURCE_ID=""
+  CONCIERGE_EMAIL=""
+  APPROVER_EMAIL_RESOURCE_ID=""
+  APPROVER_EMAIL=""
 }
 
-# ── State persistence ─────────────────────────────────────────────────────────
 save_state() {
-  cat > "$STATE_FILE" << STATEFILE
+  cat >"$STATE_FILE" <<STATEFILE
+DEMO_STATE_VERSION="${STATE_VERSION}"
 SAVED_BASE_URL="${BASE_URL}"
 ORG_ID="${ORG_ID:-}"
 ROOT_KEY="${ROOT_KEY:-}"
 SERVICE_KEY="${SERVICE_KEY:-}"
-AGENT_ALICE="${AGENT_ALICE:-}"
-AGENT_BOB="${AGENT_BOB:-}"
-AGENT_VAULT="${AGENT_VAULT:-}"
-ALICE_RESOURCE_ID="${ALICE_RESOURCE_ID:-}"
-ALICE_EMAIL="${ALICE_EMAIL:-}"
-BOB_RESOURCE_ID="${BOB_RESOURCE_ID:-}"
-BOB_EMAIL="${BOB_EMAIL:-}"
-VAULT_RESOURCE_ID="${VAULT_RESOURCE_ID:-}"
-VAULT_EMAIL="${VAULT_EMAIL:-}"
-ALICE_INBOX_NEEDS_REPROVISION=${ALICE_INBOX_NEEDS_REPROVISION:-false}
+AGENT_CONCIERGE="${AGENT_CONCIERGE:-}"
+AGENT_APPROVER="${AGENT_APPROVER:-}"
+CONCIERGE_EMAIL_RESOURCE_ID="${CONCIERGE_EMAIL_RESOURCE_ID:-}"
+CONCIERGE_EMAIL="${CONCIERGE_EMAIL:-}"
+APPROVER_EMAIL_RESOURCE_ID="${APPROVER_EMAIL_RESOURCE_ID:-}"
+APPROVER_EMAIL="${APPROVER_EMAIL:-}"
 STATEFILE
 }
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  BANNER
-# ══════════════════════════════════════════════════════════════════════════════
+stripe_signature() {
+  local secret="$1"
+  local timestamp="$2"
+  local payload="$3"
+
+  printf '%s.%s' "$timestamp" "$payload" \
+    | openssl dgst -sha256 -hmac "$secret" \
+    | awk '{print $NF}'
+}
+
+post_stripe_webhook() {
+  local payload="$1"
+  local timestamp
+  local signature
+
+  timestamp="$(date +%s)"
+  signature="$(stripe_signature "$STRIPE_WEBHOOK_SECRET" "$timestamp" "$payload")"
+  call_raw POST /webhooks/stripe "$payload" \
+    "Content-Type: application/json" \
+    "stripe-signature: t=${timestamp},v1=${signature}"
+}
+
 echo ""
 echo -e "${BOLD}${BLUE}"
-cat << 'BANNER'
-  ╔═══════════════════════════════════════════════════════════════╗
-  ║         AgentConnect v0.3.0  ·  E2E Demo                     ║
-  ║                                                               ║
-  ║  "One API. Real agent identities. Immutable event log."      ║
-  ╚═══════════════════════════════════════════════════════════════╝
+cat <<'BANNER'
+  AgentConnect Phase D Demo
+  One agent identity. Multiple rails. One timeline.
 BANNER
 echo -e "${NC}"
 echo -e "  Target: ${CYAN}${BASE_URL}${NC}"
-echo -e "  Time:   $(date '+%Y-%m-%d %H:%M:%S')"
+echo -e "  Run:    ${RUN_TAG}"
 echo ""
 
-# ── Preflight ─────────────────────────────────────────────────────────────────
 for dep in curl jq; do
-  command -v "$dep" &>/dev/null \
-    && echo -e "  ${GREEN}✓${NC}  $dep" \
-    || abort "$dep not found — brew install $dep"
+  if command -v "$dep" >/dev/null 2>&1; then
+    echo -e "  ${GREEN}[OK]${NC} $dep"
+  else
+    abort "$dep not found"
+  fi
 done
+
+if [[ -n "${STRIPE_WEBHOOK_SECRET:-}" ]]; then
+  if command -v openssl >/dev/null 2>&1; then
+    echo -e "  ${GREEN}[OK]${NC} openssl"
+  else
+    warn "openssl not found - signed Stripe webhook simulation will be skipped"
+  fi
+fi
 
 step "Health check"
 call GET /health
 if [[ "$HTTP_STATUS" != "200" ]]; then
-  echo -e "\n  ${RED}Server not responding at ${BASE_URL}${NC}"
-  echo ""
-  echo -e "  Start it with:"
-  echo -e "  ${CYAN}    AGENTMAIL_API_KEY=<key> AGENTMAIL_WEBHOOK_SECRET=<secret> npm run dev${NC}"
-  exit 1
+  abort "Server not responding at ${BASE_URL}. Start it with: source .env && npm run dev"
 fi
 pass "Server is up"
 
-# ── State management ──────────────────────────────────────────────────────────
-ALICE_INBOX_NEEDS_REPROVISION=false
+reset_state
 STATE_LOADED=false
-ORG_ID="${ORG_ID:-}"
 
 if [[ -f "$STATE_FILE" ]]; then
   # shellcheck source=/dev/null
   source "$STATE_FILE"
-  if [[ "${SAVED_BASE_URL:-}" == "$BASE_URL" && -n "${ORG_ID:-}" ]]; then
-    echo -e "\n  ${CYAN}↺  Found saved state ($STATE_FILE) — verifying against server…${NC}"
-    call GET "/agents/${AGENT_ALICE:-missing}" "${ROOT_KEY:-}"
+
+  if [[ "${DEMO_STATE_VERSION:-}" != "$STATE_VERSION" ]]; then
+    warn "State file version changed; starting fresh"
+    rm -f "$STATE_FILE"
+    reset_state
+  elif [[ "${SAVED_BASE_URL:-}" != "$BASE_URL" ]]; then
+    warn "State file belongs to ${SAVED_BASE_URL:-unknown}; starting fresh"
+    rm -f "$STATE_FILE"
+    reset_state
+  elif [[ -n "${ORG_ID:-}" && -n "${AGENT_CONCIERGE:-}" && -n "${ROOT_KEY:-}" ]]; then
+    step "Validating saved state"
+    call GET "/agents/${AGENT_CONCIERGE}" "$ROOT_KEY"
     if [[ "$HTTP_STATUS" == "200" ]]; then
-      pass "Saved state valid — provisioning steps will be skipped"
+      pass "Saved org, keys, and hero agent are still valid"
       STATE_LOADED=true
     else
-      echo -e "  ${YELLOW}!  Saved state is stale (HTTP ${HTTP_STATUS}) — starting fresh${NC}"
+      warn "Saved state is stale; starting fresh"
       rm -f "$STATE_FILE"
-      ORG_ID=""; ROOT_KEY=""; SERVICE_KEY=""
-      AGENT_ALICE=""; AGENT_BOB=""; AGENT_VAULT=""
-      ALICE_RESOURCE_ID=""; ALICE_EMAIL=""; BOB_RESOURCE_ID=""
-      BOB_EMAIL=""; VAULT_RESOURCE_ID=""; VAULT_EMAIL=""
-      ALICE_INBOX_NEEDS_REPROVISION=false
+      reset_state
     fi
-  else
-    echo -e "\n  ${YELLOW}!  State file is for a different server (${SAVED_BASE_URL:-?}) — starting fresh${NC}"
-    rm -f "$STATE_FILE"
-    ORG_ID=""; ROOT_KEY=""; SERVICE_KEY=""
-    AGENT_ALICE=""; AGENT_BOB=""; AGENT_VAULT=""
-    ALICE_RESOURCE_ID=""; ALICE_EMAIL=""; BOB_RESOURCE_ID=""
-    BOB_EMAIL=""; VAULT_RESOURCE_ID=""; VAULT_EMAIL=""
-    ALICE_INBOX_NEEDS_REPROVISION=false
   fi
 fi
 
-# Re-provision Alice's inbox if it was deprovisioned in a previous run
-if [[ "$STATE_LOADED" == "true" && "$ALICE_INBOX_NEEDS_REPROVISION" == "true" ]]; then
-  step "Re-provisioning Alice's inbox (deprovisioned in previous run)"
-  call POST "/agents/${AGENT_ALICE}/resources" "$ROOT_KEY" \
-    '{"type":"email_inbox","provider":"agentmail","config":{"blocked_domains":["competitor.com"],"max_recipients":3}}'
-  assert_http "Re-provision Alice inbox" 201
-  ALICE_RESOURCE_ID=$(jq_r "$HTTP_BODY" '.resource.id')
-  ALICE_EMAIL=$(jq_r "$HTTP_BODY" '.resource.providerRef')
-  require_var "alice_resource_id" "$ALICE_RESOURCE_ID"
-  require_var "alice_email"       "$ALICE_EMAIL"
-  ALICE_INBOX_NEEDS_REPROVISION=false
-  save_state
-  info "Alice's new inbox: $ALICE_EMAIL"
-fi
-
-# Restore vault-relay if it was archived in a previous run and not cleaned up
-if [[ "$STATE_LOADED" == "true" && -n "${AGENT_VAULT:-}" ]]; then
-  call GET "/agents/${AGENT_VAULT}" "$ROOT_KEY"
-  if [[ "$(jq_r "$HTTP_BODY" '.agent.isArchived')" == "true" ]]; then
-    step "Restoring vault-relay (was archived in a previous run)"
-    call PATCH "/agents/${AGENT_VAULT}" "$ROOT_KEY" '{"isArchived":false}'
-    [[ "$HTTP_STATUS" == "200" ]] \
-      && pass "vault-relay restored" \
-      || fail "Could not un-archive vault-relay"
-  fi
-fi
-
-# ══════════════════════════════════════════════════════════════════════════════
-section 1 "Org Bootstrap  ·  tenant creation + API keys"
-# ══════════════════════════════════════════════════════════════════════════════
+section "1. Control Plane Bootstrap"
 
 if [[ -z "$ORG_ID" ]]; then
-  step "POST /orgs — register 'Demo Corp'"
-  call POST /orgs "" '{"name":"Demo Corp"}'
+  step "Create demo org"
+  call POST /orgs "" '{"name":"Phase D Demo Org"}'
   assert_http "Create org" 201
-  json_peek "$HTTP_BODY"
+  ORG_PREVIEW="$(echo "$HTTP_BODY" | jq '.apiKey.key = "***redacted***"')"
+  json_peek "$ORG_PREVIEW"
 
-  ORG_ID=$(jq_r "$HTTP_BODY" '.org.id')
-  ROOT_KEY=$(jq_r "$HTTP_BODY" '.apiKey.key')
-  require_var "org_id"   "$ORG_ID"
+  ORG_ID="$(jq_r "$HTTP_BODY" '.org.id')"
+  ROOT_KEY="$(jq_r "$HTTP_BODY" '.apiKey.key')"
+  require_var "org_id" "$ORG_ID"
   require_var "root_key" "$ROOT_KEY"
   info "org_id:   $ORG_ID"
-  info "root_key: ${ROOT_KEY:0:24}…  (returned once — store it now)"
+  info "root_key: $(mask "$ROOT_KEY")"
 
-  step "POST /orgs/:id/api-keys — mint scoped service key"
-  call POST "/orgs/${ORG_ID}/api-keys" "$ROOT_KEY" '{"keyType":"service"}'
-  assert_http "Mint service key" 201
-  SERVICE_KEY=$(jq_r "$HTTP_BODY" '.apiKey.key')
+  step "Create scoped service key"
+  call POST "/orgs/${ORG_ID}/api-keys" "$ROOT_KEY"
+  assert_http "Create service key" 201
+  SERVICE_KEY="$(jq_r "$HTTP_BODY" '.apiKey.key')"
   require_var "service_key" "$SERVICE_KEY"
-  info "service key scopes: agents:read · agents:write (no admin ops)"
+  info "service_key: $(mask "$SERVICE_KEY")"
 
   save_state
 else
-  step "Loaded from saved state — skipping org creation"
-  info "org_id:   $ORG_ID"
-  info "root_key: ${ROOT_KEY:0:24}…"
-  info "service_key: loaded"
+  step "Using saved org and keys"
+  info "org_id:      $ORG_ID"
+  info "root_key:    $(mask "$ROOT_KEY")"
+  info "service_key: $(mask "$SERVICE_KEY")"
 fi
 
-# ══════════════════════════════════════════════════════════════════════════════
-section 2 "Agent Provisioning  ·  3 agents, ~2 seconds"
-# ══════════════════════════════════════════════════════════════════════════════
+step "Service key can read org-scoped agent data"
+call GET /agents "$SERVICE_KEY"
+assert_http "Service key reads agents" 200
 
-if [[ -z "$AGENT_ALICE" ]]; then
-  step "Create alice-support-bot"
-  call POST /agents "$ROOT_KEY" '{"name":"alice-support-bot"}'
-  assert_http "Create alice" 201
-  AGENT_ALICE=$(jq_r "$HTTP_BODY" '.agent.id')
-  require_var "agent_alice" "$AGENT_ALICE"
-  info "$AGENT_ALICE"
+step "Service key cannot mint more API keys"
+call POST "/orgs/${ORG_ID}/api-keys" "$SERVICE_KEY"
+assert_http "Service key blocked from admin key creation" 403
 
-  step "Create bob-outreach-bot"
-  call POST /agents "$ROOT_KEY" '{"name":"bob-outreach-bot"}'
-  assert_http "Create bob" 201
-  AGENT_BOB=$(jq_r "$HTTP_BODY" '.agent.id')
-  require_var "agent_bob" "$AGENT_BOB"
-  info "$AGENT_BOB"
+section "2. Agent Identity and Email Rail"
 
-  step "Create vault-relay (internal)"
-  call POST /agents "$ROOT_KEY" '{"name":"vault-relay"}'
-  assert_http "Create vault" 201
-  AGENT_VAULT=$(jq_r "$HTTP_BODY" '.agent.id')
-  require_var "agent_vault" "$AGENT_VAULT"
-  info "$AGENT_VAULT"
-
-  save_state
+if [[ -z "$AGENT_CONCIERGE" ]]; then
+  step "Create hero agent: concierge-agent"
+  call POST /agents "$ROOT_KEY" '{"name":"concierge-agent"}'
+  assert_http "Create concierge agent" 201
+  AGENT_CONCIERGE="$(jq_r "$HTTP_BODY" '.agent.id')"
+  require_var "agent_concierge" "$AGENT_CONCIERGE"
+  info "concierge_agent: $AGENT_CONCIERGE"
 else
-  step "Loaded from saved state — skipping agent creation"
-  info "alice:  $AGENT_ALICE"
-  info "bob:    $AGENT_BOB"
-  info "vault:  $AGENT_VAULT"
+  step "Using saved hero agent"
+  info "concierge_agent: $AGENT_CONCIERGE"
 fi
 
-step "GET /agents — all 3 visible immediately"
+if [[ -z "$AGENT_APPROVER" ]]; then
+  step "Create counterpart agent: ops-approver"
+  call POST /agents "$ROOT_KEY" '{"name":"ops-approver"}'
+  assert_http "Create approver agent" 201
+  AGENT_APPROVER="$(jq_r "$HTTP_BODY" '.agent.id')"
+  require_var "agent_approver" "$AGENT_APPROVER"
+  info "approver_agent:  $AGENT_APPROVER"
+else
+  step "Using saved counterpart agent"
+  info "approver_agent: $AGENT_APPROVER"
+fi
+
+save_state
+
+step "List agents"
 call GET /agents "$ROOT_KEY"
 assert_http "List agents" 200
-AGENT_COUNT=$(jq_r "$HTTP_BODY" '.agents | length')
-if [[ "$AGENT_COUNT" -ge 3 ]]; then
-  pass "List shows $AGENT_COUNT agents"
+AGENT_COUNT="$(jq_r "$HTTP_BODY" '.agents | length')"
+if [[ "$AGENT_COUNT" -ge 2 ]]; then
+  pass "Org currently has $AGENT_COUNT visible agents"
 else
-  fail "Expected ≥3 agents, got $AGENT_COUNT"
+  fail "Expected at least 2 agents, got $AGENT_COUNT"
 fi
 
-step "PATCH /agents/:id — rename alice (non-destructive update)"
-call PATCH "/agents/${AGENT_ALICE}" "$ROOT_KEY" '{"name":"alice-support-v2"}'
-assert_http "Rename alice" 200
-ALICE_NAME=$(jq_r "$HTTP_BODY" '.agent.name')
-[[ "$ALICE_NAME" == "alice-support-v2" ]] \
-  && pass "Name updated → alice-support-v2" \
-  || fail "Expected alice-support-v2, got $ALICE_NAME"
+if [[ -n "$CONCIERGE_EMAIL_RESOURCE_ID" ]]; then
+  step "Validate saved concierge inbox"
+  call GET "/agents/${AGENT_CONCIERGE}/resources" "$ROOT_KEY"
+  if [[ "$HTTP_STATUS" == "200" ]] && active_resource_present "$HTTP_BODY" "$CONCIERGE_EMAIL_RESOURCE_ID"; then
+    CONCIERGE_EMAIL="$(echo "$HTTP_BODY" | jq -r --arg rid "$CONCIERGE_EMAIL_RESOURCE_ID" '.resources[] | select(.id == $rid) | .providerRef')"
+    pass "Saved concierge inbox is still active"
+  else
+    warn "Saved concierge inbox missing; re-provisioning"
+    CONCIERGE_EMAIL_RESOURCE_ID=""
+    CONCIERGE_EMAIL=""
+  fi
+fi
 
-# ══════════════════════════════════════════════════════════════════════════════
-section 3 "Email Inbox Provisioning  ·  per-agent send policies"
-# ══════════════════════════════════════════════════════════════════════════════
-
-if [[ -z "$ALICE_RESOURCE_ID" ]]; then
-  step "Provision Alice's inbox  (blocked_domains=[competitor.com], max_recipients=3)"
-  call POST "/agents/${AGENT_ALICE}/resources" "$ROOT_KEY" \
+if [[ -z "$CONCIERGE_EMAIL_RESOURCE_ID" ]]; then
+  step "Provision concierge email inbox with send policy"
+  call POST "/agents/${AGENT_CONCIERGE}/resources" "$ROOT_KEY" \
     '{"type":"email_inbox","provider":"agentmail","config":{"blocked_domains":["competitor.com"],"max_recipients":3}}'
-  assert_http "Provision Alice inbox" 201
-  json_peek "$HTTP_BODY"
 
-  ALICE_RESOURCE_ID=$(jq_r "$HTTP_BODY" '.resource.id')
-  ALICE_EMAIL=$(jq_r "$HTTP_BODY" '.resource.providerRef')
-  require_var "alice_resource_id" "$ALICE_RESOURCE_ID"
-  require_var "alice_email"       "$ALICE_EMAIL"
-  ALICE_STATE=$(jq_r "$HTTP_BODY" '.resource.state')
-  [[ "$ALICE_STATE" == "active" ]] && pass "state: active" || fail "Expected active, got $ALICE_STATE"
-  info "Alice's inbox: $ALICE_EMAIL"
-else
-  step "Alice's inbox — loaded from saved state"
-  info "resource_id: $ALICE_RESOURCE_ID"
-  info "email:       $ALICE_EMAIL"
+  if [[ "$HTTP_STATUS" == "201" ]]; then
+    pass "HTTP 201 - Concierge inbox provisioned"
+  else
+    local_message="$(jq_r "$HTTP_BODY" '.message // empty')"
+    if [[ "$HTTP_STATUS" == "404" && "$local_message" == *"No adapter for provider: agentmail"* ]]; then
+      abort "AgentMail adapter not configured on the server. Start with: source .env && npm run dev"
+    fi
+    fail "HTTP $HTTP_STATUS (expected 201) - Concierge inbox provisioned"
+    [[ -n "$local_message" ]] && info "message: $local_message"
+    abort "Cannot continue without an email inbox"
+  fi
+
+  CONCIERGE_EMAIL_RESOURCE_ID="$(jq_r "$HTTP_BODY" '.resource.id')"
+  CONCIERGE_EMAIL="$(jq_r "$HTTP_BODY" '.resource.providerRef')"
+  require_var "concierge_email_resource_id" "$CONCIERGE_EMAIL_RESOURCE_ID"
+  require_var "concierge_email" "$CONCIERGE_EMAIL"
+  info "concierge inbox: $CONCIERGE_EMAIL"
 fi
 
-if [[ -z "$BOB_RESOURCE_ID" ]]; then
-  step "Provision Bob's inbox  (allowed_domains=[agentmail.to])"
-  call POST "/agents/${AGENT_BOB}/resources" "$ROOT_KEY" \
-    '{"type":"email_inbox","provider":"agentmail","config":{"allowed_domains":["agentmail.to"]}}'
-  assert_http "Provision Bob inbox" 201
-
-  BOB_RESOURCE_ID=$(jq_r "$HTTP_BODY" '.resource.id')
-  BOB_EMAIL=$(jq_r "$HTTP_BODY" '.resource.providerRef')
-  require_var "bob_resource_id" "$BOB_RESOURCE_ID"
-  require_var "bob_email"       "$BOB_EMAIL"
-  info "Bob's inbox: $BOB_EMAIL"
-else
-  step "Bob's inbox — loaded from saved state"
-  info "resource_id: $BOB_RESOURCE_ID"
-  info "email:       $BOB_EMAIL"
+if [[ -n "$APPROVER_EMAIL_RESOURCE_ID" ]]; then
+  step "Validate saved approver inbox"
+  call GET "/agents/${AGENT_APPROVER}/resources" "$ROOT_KEY"
+  if [[ "$HTTP_STATUS" == "200" ]] && active_resource_present "$HTTP_BODY" "$APPROVER_EMAIL_RESOURCE_ID"; then
+    APPROVER_EMAIL="$(echo "$HTTP_BODY" | jq -r --arg rid "$APPROVER_EMAIL_RESOURCE_ID" '.resources[] | select(.id == $rid) | .providerRef')"
+    pass "Saved approver inbox is still active"
+  else
+    warn "Saved approver inbox missing; re-provisioning"
+    APPROVER_EMAIL_RESOURCE_ID=""
+    APPROVER_EMAIL=""
+  fi
 fi
 
-if [[ -z "$VAULT_RESOURCE_ID" ]]; then
-  step "Provision Vault's inbox  (no policy — unrestricted relay)"
-  call POST "/agents/${AGENT_VAULT}/resources" "$ROOT_KEY" \
+if [[ -z "$APPROVER_EMAIL_RESOURCE_ID" ]]; then
+  step "Provision approver inbox"
+  call POST "/agents/${AGENT_APPROVER}/resources" "$ROOT_KEY" \
     '{"type":"email_inbox","provider":"agentmail","config":{}}'
-  assert_http "Provision Vault inbox" 201
 
-  VAULT_RESOURCE_ID=$(jq_r "$HTTP_BODY" '.resource.id')
-  VAULT_EMAIL=$(jq_r "$HTTP_BODY" '.resource.providerRef')
-  require_var "vault_resource_id" "$VAULT_RESOURCE_ID"
-  require_var "vault_email"       "$VAULT_EMAIL"
-  info "Vault's inbox: $VAULT_EMAIL"
-else
-  step "Vault's inbox — loaded from saved state"
-  info "resource_id: $VAULT_RESOURCE_ID"
-  info "email:       $VAULT_EMAIL"
+  if [[ "$HTTP_STATUS" == "201" ]]; then
+    pass "HTTP 201 - Approver inbox provisioned"
+  else
+    local_message="$(jq_r "$HTTP_BODY" '.message // empty')"
+    if [[ "$HTTP_STATUS" == "404" && "$local_message" == *"No adapter for provider: agentmail"* ]]; then
+      abort "AgentMail adapter not configured on the server. Start with: source .env && npm run dev"
+    fi
+    fail "HTTP $HTTP_STATUS (expected 201) - Approver inbox provisioned"
+    [[ -n "$local_message" ]] && info "message: $local_message"
+    abort "Cannot continue without a counterpart inbox"
+  fi
+
+  APPROVER_EMAIL_RESOURCE_ID="$(jq_r "$HTTP_BODY" '.resource.id')"
+  APPROVER_EMAIL="$(jq_r "$HTTP_BODY" '.resource.providerRef')"
+  require_var "approver_email_resource_id" "$APPROVER_EMAIL_RESOURCE_ID"
+  require_var "approver_email" "$APPROVER_EMAIL"
+  info "approver inbox:  $APPROVER_EMAIL"
 fi
 
 save_state
 
-step "GET /agents/:id/resources — verify Alice has 1 active inbox"
-call GET "/agents/${AGENT_ALICE}/resources" "$ROOT_KEY"
-assert_http "List resources" 200
-R_COUNT=$(jq_r "$HTTP_BODY" '.resources | length')
-[[ "$R_COUNT" -eq 1 ]] \
-  && pass "1 resource provisioned (state: active)" \
-  || fail "Expected 1 resource, got $R_COUNT"
-
-# ══════════════════════════════════════════════════════════════════════════════
-section 4 "Happy Path  ·  send emails between agents"
-# ══════════════════════════════════════════════════════════════════════════════
-# All sends use real @agentmail.to addresses provisioned above.
-
-step "Alice → Vault  (recipient is @agentmail.to — not in blocked_domains)"
-call POST "/agents/${AGENT_ALICE}/actions/send_email" "$ROOT_KEY" \
-  "$(jq -n --arg to "$VAULT_EMAIL" \
-    '{"to":[$to],"subject":"Hello from Alice","text":"Hi Vault, this is a live send."}')"
-assert_http "Alice sends to Vault" 200
-
-ALICE_SENT_EVENT=$(jq_r "$HTTP_BODY" '.event.id')
-ALICE_SENT_TYPE=$(jq_r "$HTTP_BODY" '.event.eventType')
-[[ "$ALICE_SENT_TYPE" == "email.sent" ]] \
-  && pass "event.eventType = email.sent" \
-  || fail "Expected email.sent, got $ALICE_SENT_TYPE"
-info "Event ID: $ALICE_SENT_EVENT"
-info "From:     $(jq_r "$HTTP_BODY" '.event.data.from')"
-info "To:       $VAULT_EMAIL"
-
-step "Vault → Alice  (no policy on Vault — always passes)"
-call POST "/agents/${AGENT_VAULT}/actions/send_email" "$ROOT_KEY" \
-  "$(jq -n --arg to "$ALICE_EMAIL" \
-    '{"to":[$to],"subject":"Re: Hello","text":"Got it, Alice!"}')"
-assert_http "Vault sends to Alice" 200
-[[ "$(jq_r "$HTTP_BODY" '.event.eventType')" == "email.sent" ]] \
-  && pass "event.eventType = email.sent" \
-  || fail "Expected email.sent"
-
-step "Bob → Alice  (@agentmail.to is in Bob's allowed_domains)"
-call POST "/agents/${AGENT_BOB}/actions/send_email" "$ROOT_KEY" \
-  "$(jq -n --arg to "$ALICE_EMAIL" \
-    '{"to":[$to],"subject":"Outreach ping","text":"Hey Alice, Bob here."}')"
-assert_http "Bob sends to Alice (allowed domain)" 200
-[[ "$(jq_r "$HTTP_BODY" '.event.eventType')" == "email.sent" ]] \
-  && pass "event.eventType = email.sent" \
-  || fail "Expected email.sent"
-
-# ══════════════════════════════════════════════════════════════════════════════
-section 5 "Policy Enforcement  ·  guardrails that actually fire"
-# ══════════════════════════════════════════════════════════════════════════════
-# Policy is checked before any network call — no emails escape on violations.
-
-step "Alice → competitor.com  (in blocked_domains) → 403"
-call POST "/agents/${AGENT_ALICE}/actions/send_email" "$ROOT_KEY" \
-  '{"to":["spy@competitor.com"],"subject":"Leaked data","text":"..."}'
-assert_http "Blocked domain → 403" 403
-POLICY_MSG=$(jq_r "$HTTP_BODY" '.message')
-assert_contains "Error mentions 'blocked'" "$POLICY_MSG" "blocked"
-info "Reason: $POLICY_MSG"
-
-step "Alice → 4 recipients  (max_recipients=3 exceeded) → 403"
-call POST "/agents/${AGENT_ALICE}/actions/send_email" "$ROOT_KEY" \
-  '{"to":["a@ok.com","b@ok.com","c@ok.com","d@ok.com"],"subject":"Mass blast","text":"..."}'
-assert_http "Recipient limit exceeded → 403" 403
-POLICY_MSG=$(jq_r "$HTTP_BODY" '.message')
-assert_contains "Error mentions 'max_recipients'" "$POLICY_MSG" "max_recipients"
-info "Reason: $POLICY_MSG"
-
-step "Alice → exactly 3 recipients  (at the limit) → 200"
-call POST "/agents/${AGENT_ALICE}/actions/send_email" "$ROOT_KEY" \
-  "$(jq -n --arg a "$ALICE_EMAIL" --arg b "$BOB_EMAIL" --arg v "$VAULT_EMAIL" \
-    '{"to":[$a,$b,$v],"subject":"Team update","text":"All hands meeting!"}')"
-assert_http "Exactly at recipient limit → 200" 200
-info "Boundary condition passes: count(3) ≤ max_recipients(3)"
-
-step "Bob → gmail.com  (not in allowed_domains=[agentmail.to]) → 403"
-call POST "/agents/${AGENT_BOB}/actions/send_email" "$ROOT_KEY" \
-  '{"to":["user@gmail.com"],"subject":"Outreach","text":"..."}'
-assert_http "Non-allowed domain → 403" 403
-POLICY_MSG=$(jq_r "$HTTP_BODY" '.message')
-assert_contains "Error mentions 'allowed_domains'" "$POLICY_MSG" "allowed_domains"
-info "Reason: $POLICY_MSG"
-
-step "Bob → Alice's @agentmail.to address  (in allowed_domains) → 200"
-call POST "/agents/${AGENT_BOB}/actions/send_email" "$ROOT_KEY" \
-  "$(jq -n --arg to "$ALICE_EMAIL" \
-    '{"to":[$to],"subject":"Allowed outreach","text":"This domain is permitted."}')"
-assert_http "Allowed domain → 200" 200
-
-# ══════════════════════════════════════════════════════════════════════════════
-section 6 "Auth & Permission Errors  ·  no free rides"
-# ══════════════════════════════════════════════════════════════════════════════
-
-step "No Authorization header → 401"
-call GET /agents
-assert_http "Missing auth → 401" 401
-
-step "Garbage API key → 401"
-call GET /agents "sk_FAKE.NOTAREALKEY123456"
-assert_http "Invalid key → 401" 401
-
-step "Service key cannot mint API keys  (lacks api_keys:write scope) → 403"
-call POST "/orgs/${ORG_ID}/api-keys" "$SERVICE_KEY" '{"keyType":"service"}'
-assert_http "Service key blocked from minting → 403" 403
-info "Root key needed for admin operations"
-
-step "Service key CAN list agents  (has agents:read) → 200"
-call GET /agents "$SERVICE_KEY"
-assert_http "Service key reads agents → 200" 200
-
-step "Service key CAN create agents  (has agents:write) → 201"
-call POST /agents "$SERVICE_KEY" '{"name":"service-key-created-agent"}'
-assert_http "Service key creates agent → 201" 201
-EPHEMERAL_AGENT=$(jq_r "$HTTP_BODY" '.agent.id')
-info "Created: $EPHEMERAL_AGENT"
-
-step "Cross-org key minting (root key from org A, route param = org B) → 403"
-# Create a second org just to get its ID, then try to mint keys for it using org A's root key
-call POST /orgs "" '{"name":"Another Corp"}'
-assert_http "Create second org" 201
-SECOND_ORG_ID=$(jq_r "$HTTP_BODY" '.org.id')
-call POST "/orgs/${SECOND_ORG_ID}/api-keys" "$ROOT_KEY" '{"keyType":"service"}'
-assert_http "Cannot mint keys for another org → 403" 403
-
-# ══════════════════════════════════════════════════════════════════════════════
-section 7 "Validation Errors  ·  Zod rejects bad input at ingress"
-# ══════════════════════════════════════════════════════════════════════════════
-
-step "GET /agents/:id — nonexistent ID → 404"
-call GET "/agents/agt_doesnotexist_$(date +%s)" "$ROOT_KEY"
-assert_http "Nonexistent agent → 404" 404
-
-step "Send email from agent with no inbox → 404"
-call POST "/agents/${EPHEMERAL_AGENT}/actions/send_email" "$ROOT_KEY" \
-  '{"to":["x@example.com"],"subject":"No inbox","text":"..."}'
-assert_http "No inbox → 404" 404
-info "$(jq_r "$HTTP_BODY" '.message')"
-
-step "Provision with blocked_domains as object (not array) → 400  [rejected at ingress by Zod]"
-call POST "/agents/${AGENT_ALICE}/resources" "$ROOT_KEY" \
-  '{"type":"email_inbox","provider":"agentmail","config":{"blocked_domains":{"evil":"yes"}}}'
-assert_http "Invalid config type → 400" 400
-info "$(jq_r "$HTTP_BODY" '.message')"
-
-step "Create agent with empty name → 400"
-call POST /agents "$ROOT_KEY" '{"name":""}'
-assert_http "Empty name → 400" 400
-
-step "Send email with missing required 'to' field → 400"
-call POST "/agents/${AGENT_VAULT}/actions/send_email" "$ROOT_KEY" \
-  '{"subject":"No to field","text":"..."}'
-assert_http "Missing required field → 400" 400
-
-# ══════════════════════════════════════════════════════════════════════════════
-section 8 "Tenant Isolation  ·  hard org-scoped data walls"
-# ══════════════════════════════════════════════════════════════════════════════
-
-step "Create 'Attacker Corp' org"
-call POST /orgs "" '{"name":"Attacker Corp"}'
-assert_http "Create attacker org" 201
-ATTACKER_ORG=$(jq_r "$HTTP_BODY" '.org.id')
-ATTACKER_KEY=$(jq_r "$HTTP_BODY" '.apiKey.key')
-require_var "attacker_org" "$ATTACKER_ORG"
-info "Attacker org: $ATTACKER_ORG"
-
-step "Attacker tries to read Demo Corp's agent → 404  (existence not leaked)"
-call GET "/agents/${AGENT_ALICE}" "$ATTACKER_KEY"
-assert_http "Cross-org GET agent → 404" 404
-info "Returns 404, not 403 — org boundary is invisible to the caller"
-
-step "Attacker tries to send email via Demo Corp's agent → 404"
-call POST "/agents/${AGENT_ALICE}/actions/send_email" "$ATTACKER_KEY" \
-  '{"to":["victim@example.com"],"subject":"Hijack","text":"..."}'
-assert_http "Cross-org send email → 404" 404
-
-step "Attacker's GET /agents → 200, empty list (isolated)"
-call GET /agents "$ATTACKER_KEY"
-assert_http "Attacker sees own data only → 200" 200
-ATTACKER_COUNT=$(jq_r "$HTTP_BODY" '.agents | length')
-[[ "$ATTACKER_COUNT" -eq 0 ]] \
-  && pass "0 agents (Demo Corp data invisible to Attacker Corp)" \
-  || fail "Expected 0 agents for attacker, got $ATTACKER_COUNT"
-
-step "Attacker tries to deprovision Demo Corp's resource → 404"
-call DELETE "/agents/${AGENT_ALICE}/resources/${ALICE_RESOURCE_ID}" "$ATTACKER_KEY"
-assert_http "Cross-org deprovision → 404" 404
-
-# ══════════════════════════════════════════════════════════════════════════════
-section 9 "Idempotency  ·  exactly-once event delivery"
-# ══════════════════════════════════════════════════════════════════════════════
-
-IDEM_KEY="demo-idempotent-key-$(date +%s)"
-
-step "First send with idempotency_key"
-call POST "/agents/${AGENT_VAULT}/actions/send_email" "$ROOT_KEY" \
-  "$(jq -n --arg to "$ALICE_EMAIL" --arg k "$IDEM_KEY" \
-    '{"to":[$to],"subject":"Idempotent send","text":"This fires once.","idempotency_key":$k}')"
-assert_http "First send" 200
-EVENT_ID_1=$(jq_r "$HTTP_BODY" '.event.id')
-info "Event ID (call 1): $EVENT_ID_1"
-
-step "Replay the exact same request  (same idempotency_key)"
-call POST "/agents/${AGENT_VAULT}/actions/send_email" "$ROOT_KEY" \
-  "$(jq -n --arg to "$ALICE_EMAIL" --arg k "$IDEM_KEY" \
-    '{"to":[$to],"subject":"Idempotent send","text":"This fires once.","idempotency_key":$k}')"
-assert_http "Replay (second call)" 200
-EVENT_ID_2=$(jq_r "$HTTP_BODY" '.event.id')
-info "Event ID (call 2): $EVENT_ID_2"
-
-if [[ "$EVENT_ID_1" == "$EVENT_ID_2" ]]; then
-  pass "Same event ID returned — idempotency key deduplicated (no double-send, no double-event)"
+step "Hero agent now has an active inbox"
+call GET "/agents/${AGENT_CONCIERGE}/resources" "$ROOT_KEY"
+assert_http "List concierge resources" 200
+EMAIL_ACTIVE_COUNT="$(echo "$HTTP_BODY" | jq -r '[.resources[] | select(.type == "email_inbox" and .state == "active")] | length')"
+if [[ "$EMAIL_ACTIVE_COUNT" -ge 1 ]]; then
+  pass "Concierge has $EMAIL_ACTIVE_COUNT active email resource(s)"
 else
-  fail "Different IDs returned — idempotency broken ($EVENT_ID_1 ≠ $EVENT_ID_2)"
+  fail "Expected an active email resource for concierge"
 fi
 
-step "Different idempotency_key → new event  (not deduped)"
-IDEM_KEY_2="demo-idempotent-key-$(date +%s)-b"
-call POST "/agents/${AGENT_VAULT}/actions/send_email" "$ROOT_KEY" \
-  "$(jq -n --arg to "$ALICE_EMAIL" --arg k "$IDEM_KEY_2" \
-    '{"to":[$to],"subject":"Different send","text":"New key.","idempotency_key":$k}')"
-assert_http "New key → new event" 200
-EVENT_ID_3=$(jq_r "$HTTP_BODY" '.event.id')
-[[ "$EVENT_ID_1" != "$EVENT_ID_3" ]] \
-  && pass "Different key → different event ID (correct)" \
-  || fail "Different keys returned same event ID (incorrect)"
+EMAIL_SUBJECT="Phase D live email ${RUN_TAG}"
 
-# ══════════════════════════════════════════════════════════════════════════════
-section 10 "Event Log  ·  queryable, filterable, cursor-paged"
-# ══════════════════════════════════════════════════════════════════════════════
+step "Send a live email from concierge-agent to ops-approver"
+EMAIL_REQUEST="$(jq -nc \
+  --arg to "$APPROVER_EMAIL" \
+  --arg subject "$EMAIL_SUBJECT" \
+  --arg text "This is the live multi-rail demo path." \
+  '{"to":[$to],"subject":$subject,"text":$text}')"
+call POST "/agents/${AGENT_CONCIERGE}/actions/send_email" "$ROOT_KEY" "$EMAIL_REQUEST"
+assert_http "Send email" 200
 
-step "GET /agents/:id/events — Alice's full immutable log"
-call GET "/agents/${AGENT_ALICE}/events" "$ROOT_KEY"
-assert_http "Get full event log" 200
-TOTAL_EVENTS=$(jq_r "$HTTP_BODY" '.events | length')
-if [[ "$TOTAL_EVENTS" -gt 0 ]]; then
-  pass "Event log has $TOTAL_EVENTS events"
+EMAIL_EVENT_ID="$(jq_r "$HTTP_BODY" '.event.id')"
+EMAIL_EVENT_TYPE="$(jq_r "$HTTP_BODY" '.event.eventType')"
+EMAIL_THREAD_ID="$(jq_r "$HTTP_BODY" '.event.data.thread_id // null')"
+if [[ "$EMAIL_EVENT_TYPE" == "email.sent" ]]; then
+  pass "Canonical email event written as email.sent"
 else
-  fail "Expected events in log"
+  fail "Expected email.sent, got $EMAIL_EVENT_TYPE"
 fi
-info "nextCursor: $(jq_r "$HTTP_BODY" '.nextCursor')"
+info "email_event_id: $EMAIL_EVENT_ID"
+info "thread_id:      $EMAIL_THREAD_ID"
 
-step "GET …?type=email.sent — filter by event type"
-call GET "/agents/${AGENT_ALICE}/events?type=email.sent" "$ROOT_KEY"
-assert_http "Filter by type" 200
-SENT_COUNT=$(jq_r "$HTTP_BODY" '.events | length')
-ALL_CORRECT=$(echo "$HTTP_BODY" | jq -r 'if .events | length == 0 then "true" else [.events[].eventType == "email.sent"] | all end' 2>/dev/null)
-if [[ "$ALL_CORRECT" == "true" && "$SENT_COUNT" -gt 0 ]]; then
-  pass "Type filter: $SENT_COUNT email.sent events (no leakage of other types)"
-elif [[ "$SENT_COUNT" -eq 0 ]]; then
-  fail "Expected email.sent events, got 0"
+step "Policy blocks a send before any provider call escapes"
+call POST "/agents/${AGENT_CONCIERGE}/actions/send_email" "$ROOT_KEY" \
+  '{"to":["pilot@competitor.com"],"subject":"Blocked","text":"This should be denied."}'
+assert_http "Blocked domain denied" 403
+assert_contains "Policy error mentions blocked_domains" "$(jq_r "$HTTP_BODY" '.message')" "blocked"
+
+section "3. Card Rail and One-Time Sensitive Data"
+
+CARD_DEMO_RAN=false
+CARD_WEBHOOKS_RECORDED=false
+CARD_RESOURCE_ID=""
+CARD_PROVIDER_REF=""
+CARD_EVENT_ID=""
+CARD_LAST4=""
+AUTHORIZATION_ID=""
+TRANSACTION_ID=""
+
+if is_truthy "${DEMO_SKIP_CARD:-0}"; then
+  skip "DEMO_SKIP_CARD requested; card issuance and card-backed timeline checks are disabled"
 else
-  fail "Type filter returned non-email.sent events"
+  step "Generic resource creation is intentionally rejected for Stripe cards"
+  call POST "/agents/${AGENT_CONCIERGE}/resources" "$ROOT_KEY" \
+    '{"type":"card","provider":"stripe","config":{}}'
+  assert_http "Cards must be issued via the explicit action endpoint" 400
+  assert_contains "Error points callers to /actions/issue_card" "$(jq_r "$HTTP_BODY" '.message')" "issue_card"
+
+  CARD_IDEMPOTENCY_KEY="demo-card-${RUN_TAG}"
+  CARD_REQUEST="$(jq -nc \
+    --arg idem "$CARD_IDEMPOTENCY_KEY" \
+    '{"spending_limits":[{"amount":25000,"interval":"daily"}],"allowed_merchant_countries":["US"],"idempotency_key":$idem}')"
+
+  step "Issue a virtual card for the same agent identity"
+  call POST "/agents/${AGENT_CONCIERGE}/actions/issue_card" "$ROOT_KEY" "$CARD_REQUEST"
+
+  if [[ "$HTTP_STATUS" == "200" ]]; then
+    pass "HTTP 200 - Card issued"
+    CARD_DEMO_RAN=true
+    CARD_RESOURCE_ID="$(jq_r "$HTTP_BODY" '.resource.id')"
+    CARD_PROVIDER_REF="$(jq_r "$HTTP_BODY" '.resource.providerRef')"
+    CARD_EVENT_ID="$(jq_r "$HTTP_BODY" '.event.id')"
+    CARD_LAST4="$(jq_r "$HTTP_BODY" '.card.last4')"
+    CARD_EVENT_TYPE="$(jq_r "$HTTP_BODY" '.event.eventType')"
+    CARD_NUMBER="$(jq_r "$HTTP_BODY" '.card.number // null')"
+    CARD_CVC="$(jq_r "$HTTP_BODY" '.card.cvc // null')"
+    CARD_EXP_MONTH="$(jq_r "$HTTP_BODY" '.card.exp_month')"
+    CARD_EXP_YEAR="$(jq_r "$HTTP_BODY" '.card.exp_year')"
+
+    require_var "card_resource_id" "$CARD_RESOURCE_ID"
+    require_var "card_provider_ref" "$CARD_PROVIDER_REF"
+
+    if [[ "$CARD_EVENT_TYPE" == "payment.card.issued" ]]; then
+      pass "Canonical card issuance event written as payment.card.issued"
+    else
+      fail "Expected payment.card.issued, got $CARD_EVENT_TYPE"
+    fi
+
+    if [[ "$CARD_PROVIDER_REF" == ic_* ]]; then
+      pass "Stripe card providerRef stored as $CARD_PROVIDER_REF"
+    else
+      fail "Expected Stripe providerRef to start with ic_, got $CARD_PROVIDER_REF"
+    fi
+
+    if [[ "$CARD_NUMBER" != "null" && "$CARD_CVC" != "null" ]]; then
+      pass "PAN and CVC returned once to the caller"
+    else
+      fail "Expected card number and CVC on first issuance response"
+    fi
+
+    CARD_CONFIG_HAS_NUMBER="$(echo "$HTTP_BODY" | jq -r '.resource.config | has("number")')"
+    CARD_CONFIG_HAS_CVC="$(echo "$HTTP_BODY" | jq -r '.resource.config | has("cvc")')"
+    if [[ "$CARD_CONFIG_HAS_NUMBER" == "false" && "$CARD_CONFIG_HAS_CVC" == "false" ]]; then
+      pass "Stored resource config excludes PAN and CVC"
+    else
+      fail "Sensitive card fields leaked into resource config"
+    fi
+
+    info "card resource:  $CARD_RESOURCE_ID"
+    info "provider_ref:   $CARD_PROVIDER_REF"
+    info "card last4:     $CARD_LAST4"
+    info "expiry:         ${CARD_EXP_MONTH}/${CARD_EXP_YEAR}"
+
+    step "Replay the same issue_card request with the same idempotency key"
+    call POST "/agents/${AGENT_CONCIERGE}/actions/issue_card" "$ROOT_KEY" "$CARD_REQUEST"
+    assert_http "Idempotent card replay" 200
+
+    REPLAY_RESOURCE_ID="$(jq_r "$HTTP_BODY" '.resource.id')"
+    REPLAY_EVENT_ID="$(jq_r "$HTTP_BODY" '.event.id')"
+    REPLAY_NUMBER="$(jq_r "$HTTP_BODY" '.card.number // null')"
+    REPLAY_CVC="$(jq_r "$HTTP_BODY" '.card.cvc // null')"
+
+    if [[ "$REPLAY_RESOURCE_ID" == "$CARD_RESOURCE_ID" && "$REPLAY_EVENT_ID" == "$CARD_EVENT_ID" ]]; then
+      pass "Replay returned the same resource and event"
+    else
+      fail "Replay did not return the same card issuance record"
+    fi
+
+    if [[ "$REPLAY_NUMBER" == "null" && "$REPLAY_CVC" == "null" ]]; then
+      pass "Sensitive card data is not replayed after the first successful response"
+    else
+      fail "Replay unexpectedly returned PAN or CVC"
+    fi
+
+    step "Hero agent now spans both email and card rails"
+    call GET "/agents/${AGENT_CONCIERGE}/resources" "$ROOT_KEY"
+    assert_http "List hero resources" 200
+    HERO_RESOURCE_TYPES="$(echo "$HTTP_BODY" | jq -r '[.resources[].type] | join(", ")')"
+    info "resource types: ${HERO_RESOURCE_TYPES}"
+    HERO_RESOURCE_COUNT="$(jq_r "$HTTP_BODY" '.resources | length')"
+    if [[ "$HERO_RESOURCE_COUNT" -ge 2 ]]; then
+      pass "Hero agent has both rails attached"
+    else
+      fail "Expected at least 2 active resources for hero agent"
+    fi
+  else
+    CARD_MESSAGE="$(jq_r "$HTTP_BODY" '.message // empty')"
+    if [[ "$HTTP_STATUS" == "500" && "$CARD_MESSAGE" == "Stripe adapter not configured" ]]; then
+      skip "Stripe adapter is not configured on the server; card issuance and card-backed timeline checks are skipped"
+    else
+      fail "HTTP $HTTP_STATUS (expected 200) - Card issued"
+      [[ -n "$CARD_MESSAGE" ]] && info "message: $CARD_MESSAGE"
+    fi
+  fi
 fi
 
-step "GET …?limit=1 — cursor-based pagination"
-call GET "/agents/${AGENT_ALICE}/events?limit=1" "$ROOT_KEY"
-assert_http "Page 1 (limit=1)" 200
-NEXT_CURSOR=$(jq_r "$HTTP_BODY" '.nextCursor')
-P1_EVENT_ID=$(jq_r "$HTTP_BODY" '.events[0].id')
+if [[ "$CARD_DEMO_RAN" == "true" ]]; then
+  section "4. Stripe Webhooks Become Canonical Card Activity"
 
+  if [[ -z "${STRIPE_WEBHOOK_SECRET:-}" ]]; then
+    skip "STRIPE_WEBHOOK_SECRET is not exported in this shell; signed Stripe webhook simulation skipped"
+  elif ! command -v openssl >/dev/null 2>&1; then
+    skip "openssl is unavailable; signed Stripe webhook simulation skipped"
+  else
+    ID_STAMP="$(date +%s)$$"
+    AUTHORIZATION_ID="iauth_demo_${ID_STAMP}"
+    TRANSACTION_ID="ipi_demo_${ID_STAMP}"
+    AUTH_EVENT_ID="evt_demo_auth_${ID_STAMP}"
+    TXN_EVENT_ID="evt_demo_txn_${ID_STAMP}"
+    CREATED_AT="$(date +%s)"
+
+    AUTH_PAYLOAD="$(jq -nc \
+      --arg event_id "$AUTH_EVENT_ID" \
+      --arg auth_id "$AUTHORIZATION_ID" \
+      --arg card_id "$CARD_PROVIDER_REF" \
+      --argjson created "$CREATED_AT" \
+      '{"id":$event_id,"type":"issuing_authorization.created","created":$created,"data":{"object":{"id":$auth_id,"card":{"id":$card_id},"approved":true,"amount":4200,"currency":"usd"}}}')"
+
+    step "Simulate signed Stripe authorization webhook"
+    post_stripe_webhook "$AUTH_PAYLOAD"
+    if [[ "$HTTP_STATUS" == "200" ]]; then
+      pass "Signed authorization webhook accepted"
+    elif [[ "$HTTP_STATUS" == "401" ]]; then
+      skip "Stripe webhook signature failed; local STRIPE_WEBHOOK_SECRET does not match the server"
+    else
+      fail "HTTP $HTTP_STATUS (expected 200) - Authorization webhook accepted"
+      WEBHOOK_MESSAGE="$(jq_r "$HTTP_BODY" '.message // empty')"
+      [[ -n "$WEBHOOK_MESSAGE" ]] && info "message: $WEBHOOK_MESSAGE"
+    fi
+
+    if [[ "$HTTP_STATUS" == "200" ]]; then
+      TXN_PAYLOAD="$(jq -nc \
+        --arg event_id "$TXN_EVENT_ID" \
+        --arg txn_id "$TRANSACTION_ID" \
+        --arg auth_id "$AUTHORIZATION_ID" \
+        --arg card_id "$CARD_PROVIDER_REF" \
+        --argjson created "$((CREATED_AT + 1))" \
+        '{"id":$event_id,"type":"issuing_transaction.created","created":$created,"data":{"object":{"id":$txn_id,"card":$card_id,"authorization":$auth_id,"amount":4200,"currency":"usd"}}}')"
+
+      step "Simulate signed Stripe settlement webhook"
+      post_stripe_webhook "$TXN_PAYLOAD"
+      assert_http "Signed settlement webhook accepted" 200
+
+      if [[ "$HTTP_STATUS" == "200" ]]; then
+        step "Query canonical card events"
+        call GET "/agents/${AGENT_CONCIERGE}/events?type=payment.card.authorized" "$ROOT_KEY"
+        assert_http "Authorized event query" 200
+        AUTH_MATCHED="$(echo "$HTTP_BODY" | jq -r --arg auth "$AUTHORIZATION_ID" '[.events[].data.authorization_id == $auth] | any')"
+        if [[ "$AUTH_MATCHED" == "true" ]]; then
+          pass "Authorization webhook became payment.card.authorized"
+        else
+          fail "Could not find authorized event for $AUTHORIZATION_ID"
+        fi
+
+        call GET "/agents/${AGENT_CONCIERGE}/events?type=payment.card.settled" "$ROOT_KEY"
+        assert_http "Settled event query" 200
+        TXN_MATCHED="$(echo "$HTTP_BODY" | jq -r --arg txn "$TRANSACTION_ID" '[.events[].data.transaction_id == $txn] | any')"
+        if [[ "$TXN_MATCHED" == "true" ]]; then
+          pass "Settlement webhook became payment.card.settled"
+          CARD_WEBHOOKS_RECORDED=true
+        else
+          fail "Could not find settled event for $TRANSACTION_ID"
+        fi
+      fi
+    fi
+  fi
+fi
+
+section "5. Canonical Event Log and Unified Timeline"
+
+step "Full event log for the hero agent"
+call GET "/agents/${AGENT_CONCIERGE}/events" "$ROOT_KEY"
+assert_http "List hero events" 200
+EVENT_TOTAL="$(jq_r "$HTTP_BODY" '.events | length')"
+if [[ "$EVENT_TOTAL" -ge 1 ]]; then
+  pass "Hero agent has $EVENT_TOTAL canonical event(s)"
+else
+  fail "Expected at least one event for the hero agent"
+fi
+EVENT_TYPES="$(echo "$HTTP_BODY" | jq -r '[.events[].eventType] | unique | join(", ")')"
+info "event types: ${EVENT_TYPES}"
+
+if [[ "$CARD_WEBHOOKS_RECORDED" == "true" ]]; then
+  step "Filter the event log to a single canonical card event type"
+  call GET "/agents/${AGENT_CONCIERGE}/events?type=payment.card.authorized" "$ROOT_KEY"
+  assert_http "Filter authorized events" 200
+  FILTER_COUNT="$(jq_r "$HTTP_BODY" '.events | length')"
+  if [[ "$FILTER_COUNT" -ge 1 ]]; then
+    pass "Card event filter returns authorized events only"
+  else
+    fail "Expected at least one authorized event"
+  fi
+elif [[ "$CARD_DEMO_RAN" == "true" ]]; then
+  step "Filter the event log to card issuance"
+  call GET "/agents/${AGENT_CONCIERGE}/events?type=payment.card.issued" "$ROOT_KEY"
+  assert_http "Filter issued card events" 200
+  FILTER_COUNT="$(jq_r "$HTTP_BODY" '.events | length')"
+  if [[ "$FILTER_COUNT" -ge 1 ]]; then
+    pass "Card issuance is queryable as a canonical event type"
+  else
+    fail "Expected at least one payment.card.issued event"
+  fi
+else
+  step "Filter the event log to email sends"
+  call GET "/agents/${AGENT_CONCIERGE}/events?type=email.sent" "$ROOT_KEY"
+  assert_http "Filter email.sent events" 200
+  FILTER_COUNT="$(jq_r "$HTTP_BODY" '.events | length')"
+  if [[ "$FILTER_COUNT" -ge 1 ]]; then
+    pass "Email sends are queryable as canonical events"
+  else
+    fail "Expected at least one email.sent event"
+  fi
+fi
+
+step "Read the unified timeline for the same agent identity"
+call GET "/agents/${AGENT_CONCIERGE}/timeline" "$ROOT_KEY"
+assert_http "Read hero timeline" 200
+TIMELINE_ITEM_COUNT="$(jq_r "$HTTP_BODY" '.items | length')"
+TIMELINE_KINDS="$(echo "$HTTP_BODY" | jq -r '[.items[].kind] | unique | join(", ")')"
+if [[ "$TIMELINE_ITEM_COUNT" -ge 1 ]]; then
+  pass "Timeline returned $TIMELINE_ITEM_COUNT item(s)"
+else
+  fail "Expected at least one timeline item"
+fi
+info "timeline kinds: ${TIMELINE_KINDS}"
+
+EMAIL_TIMELINE_PRESENT="$(echo "$HTTP_BODY" | jq -r '[.items[].kind == "email_thread"] | any')"
+if [[ "$EMAIL_TIMELINE_PRESENT" == "true" ]]; then
+  pass "Timeline includes an email_thread item"
+else
+  fail "Expected an email_thread item on the timeline"
+fi
+
+if [[ "$CARD_WEBHOOKS_RECORDED" == "true" ]]; then
+  CARD_TIMELINE_PRESENT="$(echo "$HTTP_BODY" | jq -r '[.items[].kind == "card_activity"] | any')"
+  if [[ "$CARD_TIMELINE_PRESENT" == "true" ]]; then
+    pass "Timeline includes grouped card_activity"
+    CARD_TIMELINE_EVENT_COUNT="$(echo "$HTTP_BODY" | jq -r '[.items[] | select(.kind == "card_activity")][0].eventCount')"
+    if [[ "$CARD_TIMELINE_EVENT_COUNT" -ge 2 ]]; then
+      pass "Card timeline item groups authorization and settlement together"
+    else
+      fail "Expected grouped card activity with at least 2 events"
+    fi
+  else
+    fail "Expected a card_activity item on the timeline"
+  fi
+elif [[ "$CARD_DEMO_RAN" == "true" ]]; then
+  CARD_ISSUED_PRESENT="$(echo "$HTTP_BODY" | jq -r '[.items[].latestEventType == "payment.card.issued"] | any')"
+  if [[ "$CARD_ISSUED_PRESENT" == "true" ]]; then
+    pass "Timeline already includes card issuance even without webhook playback"
+  else
+    fail "Expected payment.card.issued to appear on the timeline"
+  fi
+fi
+
+step "Service key can page through the timeline with an opaque cursor"
+call GET "/agents/${AGENT_CONCIERGE}/timeline?limit=1" "$SERVICE_KEY"
+assert_http "Service key reads first timeline page" 200
+PAGE_ONE_ID="$(jq_r "$HTTP_BODY" '.items[0].id // null')"
+NEXT_CURSOR="$(jq_r "$HTTP_BODY" '.nextCursor // null')"
 if [[ -n "$NEXT_CURSOR" && "$NEXT_CURSOR" != "null" ]]; then
-  pass "nextCursor present — more pages available"
-
-  step "GET page 2 using cursor"
-  call GET "/agents/${AGENT_ALICE}/events?limit=1&cursor=${NEXT_CURSOR}" "$ROOT_KEY"
-  assert_http "Page 2 via cursor" 200
-  P2_EVENT_ID=$(jq_r "$HTTP_BODY" '.events[0].id')
-  [[ "$P1_EVENT_ID" != "$P2_EVENT_ID" ]] \
-    && pass "Page 2 contains different event (no duplication across pages)" \
-    || fail "Pages returned the same event (pagination broken)"
+  call GET "/agents/${AGENT_CONCIERGE}/timeline?limit=1&cursor=${NEXT_CURSOR}" "$SERVICE_KEY"
+  assert_http "Service key reads second timeline page" 200
+  PAGE_TWO_ID="$(jq_r "$HTTP_BODY" '.items[0].id // null')"
+  if [[ "$PAGE_ONE_ID" != "null" && "$PAGE_TWO_ID" != "null" && "$PAGE_ONE_ID" != "$PAGE_TWO_ID" ]]; then
+    pass "Opaque cursor advances to a different timeline item"
+  else
+    fail "Expected a different item on the second timeline page"
+  fi
 else
-  info "Alice has ≤1 event — pagination skipped"
+  skip "Timeline pagination needs at least 2 items; current run produced a single visible page"
 fi
 
-step "GET …?cursor=GARBAGE → 400  (malformed cursor rejected)"
-call GET "/agents/${AGENT_ALICE}/events?cursor=NOTAVALIDCURSOR" "$ROOT_KEY"
-assert_http "Invalid cursor → 400" 400
+section "6. Multi-Tenant Isolation"
 
-step "GET events for nonexistent agent → 404"
-call GET "/agents/agt_ghost/events" "$ROOT_KEY"
-assert_http "Ghost agent events → 404" 404
+step "Create a second org to test org boundaries"
+call POST /orgs "" '{"name":"Shadow Org"}'
+assert_http "Create second org" 201
+ATTACKER_KEY="$(jq_r "$HTTP_BODY" '.apiKey.key')"
+require_var "attacker_key" "$ATTACKER_KEY"
 
-# ══════════════════════════════════════════════════════════════════════════════
-section 11 "Agent Archival  ·  soft delete, history preserved"
-# ══════════════════════════════════════════════════════════════════════════════
+step "Cross-org reads do not leak agent existence"
+call GET "/agents/${AGENT_CONCIERGE}" "$ATTACKER_KEY"
+assert_http "Other org cannot read hero agent" 404
 
-step "DELETE /agents/:id — soft-archive vault-relay"
-call DELETE "/agents/${AGENT_VAULT}" "$ROOT_KEY"
-assert_http "Archive vault" 200
-IS_ARCHIVED=$(jq_r "$HTTP_BODY" '.agent.isArchived')
-[[ "$IS_ARCHIVED" == "true" ]] \
-  && pass "isArchived = true (soft delete — data preserved)" \
-  || fail "Expected isArchived=true"
+step "Cross-org timeline reads are also blocked"
+call GET "/agents/${AGENT_CONCIERGE}/timeline" "$ATTACKER_KEY"
+assert_http "Other org cannot read hero timeline" 404
 
-step "GET /agents — vault absent from default listing"
-call GET /agents "$ROOT_KEY"
-assert_http "Default list excludes archived" 200
-VAULT_PRESENT=$(echo "$HTTP_BODY" | jq -r "[.agents[].id == \"$AGENT_VAULT\"] | any" 2>/dev/null)
-[[ "$VAULT_PRESENT" == "false" ]] \
-  && pass "Archived agent hidden from default list" \
-  || fail "Archived agent visible in default list"
+if [[ "$CARD_DEMO_RAN" == "true" && -n "$CARD_RESOURCE_ID" ]]; then
+  section "7. Cleanup"
 
-step "GET /agents?includeArchived=true — vault reappears"
-call GET "/agents?includeArchived=true" "$ROOT_KEY"
-assert_http "List with includeArchived=true" 200
-VAULT_IN_FULL=$(echo "$HTTP_BODY" | jq -r "[.agents[].id == \"$AGENT_VAULT\"] | any" 2>/dev/null)
-[[ "$VAULT_IN_FULL" == "true" ]] \
-  && pass "Archived agent visible with includeArchived=true" \
-  || fail "Archived agent not found with includeArchived=true"
+  step "Delete the demo card so reruns stay tidy"
+  call DELETE "/agents/${AGENT_CONCIERGE}/resources/${CARD_RESOURCE_ID}" "$ROOT_KEY"
+  assert_http "Delete card resource" 200
+  if [[ "$(jq_r "$HTTP_BODY" '.resource.state')" == "deleted" ]]; then
+    pass "Card resource marked deleted"
+  else
+    fail "Expected deleted card resource state"
+  fi
+fi
 
-step "Send email from archived agent → 404  (can't act on archived identity)"
-call POST "/agents/${AGENT_VAULT}/actions/send_email" "$ROOT_KEY" \
-  "$(jq -n --arg to "$ALICE_EMAIL" '{"to":[$to],"subject":"Ghost","text":"..."}')"
-assert_http "Archived agent action → 404" 404
+TOTAL_CHECKS=$((PASS_COUNT + FAIL_COUNT + SKIP_COUNT))
 
-step "PATCH /agents/:id — restore vault-relay (un-archive for future runs)"
-call PATCH "/agents/${AGENT_VAULT}" "$ROOT_KEY" '{"isArchived":false}'
-assert_http "Un-archive vault" 200
-IS_RESTORED=$(jq_r "$HTTP_BODY" '.agent.isArchived')
-[[ "$IS_RESTORED" == "false" ]] \
-  && pass "vault-relay restored (isArchived = false)" \
-  || fail "Expected isArchived=false after restore"
-
-# ══════════════════════════════════════════════════════════════════════════════
-section 12 "Resource Deprovisioning  ·  clean teardown"
-# ══════════════════════════════════════════════════════════════════════════════
-
-step "DELETE /agents/:id/resources/:rid — deprovision Alice's inbox"
-call DELETE "/agents/${AGENT_ALICE}/resources/${ALICE_RESOURCE_ID}" "$ROOT_KEY"
-assert_http "Deprovision inbox" 200
-DEPROVISIONED_STATE=$(jq_r "$HTTP_BODY" '.resource.state')
-[[ "$DEPROVISIONED_STATE" == "deleted" ]] \
-  && pass "Resource state → deleted" \
-  || fail "Expected state=deleted, got $DEPROVISIONED_STATE"
-
-step "GET /agents/:id/resources — no active resources"
-call GET "/agents/${AGENT_ALICE}/resources" "$ROOT_KEY"
-assert_http "List after deprovision" 200
-ACTIVE_R=$(echo "$HTTP_BODY" | jq '[.resources[] | select(.state == "active")] | length' 2>/dev/null)
-[[ "$ACTIVE_R" == "0" ]] \
-  && pass "0 active resources (deprovision complete)" \
-  || fail "Expected 0 active resources, found $ACTIVE_R"
-
-step "Send email from Alice → 404  (inbox gone)"
-call POST "/agents/${AGENT_ALICE}/actions/send_email" "$ROOT_KEY" \
-  '{"to":["anyone@example.com"],"subject":"No inbox","text":"..."}'
-assert_http "Send without inbox → 404" 404
-info "$(jq_r "$HTTP_BODY" '.message')"
-
-# Mark Alice's inbox for re-provisioning on the next run
-ALICE_INBOX_NEEDS_REPROVISION=true
-ALICE_RESOURCE_ID=""
-ALICE_EMAIL=""
-save_state
-info "State saved — Alice's inbox will be re-provisioned on next run"
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  RESULTS
-# ══════════════════════════════════════════════════════════════════════════════
-TOTAL=$((PASS_COUNT + FAIL_COUNT))
 echo ""
-echo -e "${BOLD}${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BOLD}  Results${NC}"
-echo -e "${BOLD}${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo ""
-printf "  %-14s %s\n"                        "Total checks:" "$TOTAL"
-printf "  ${GREEN}%-14s ${BOLD}%s${NC}\n"    "Passed:"       "$PASS_COUNT"
-printf "  ${RED}%-14s ${BOLD}%s${NC}\n"      "Failed:"       "$FAIL_COUNT"
+echo -e "${BOLD}${BLUE}------------------------------------------------------------${NC}"
+echo -e "${BOLD}Results${NC}"
+echo -e "${BOLD}${BLUE}------------------------------------------------------------${NC}"
+printf "  %-12s %s\n" "passed" "$PASS_COUNT"
+printf "  %-12s %s\n" "failed" "$FAIL_COUNT"
+printf "  %-12s %s\n" "skipped" "$SKIP_COUNT"
+printf "  %-12s %s\n" "total" "$TOTAL_CHECKS"
 echo ""
 
 if [[ "$FAIL_COUNT" -eq 0 ]]; then
-  echo -e "${GREEN}${BOLD}  ✓  All $TOTAL checks passed.${NC}"
+  echo -e "${GREEN}${BOLD}Phase D demo completed.${NC}"
   echo ""
-  echo -e "  ${DIM}What just ran:${NC}"
-  echo -e "  ${DIM}  • Org bootstrapped with root + service key${NC}"
-  echo -e "  ${DIM}  • 3 agents provisioned with real AgentMail inboxes${NC}"
-  echo -e "  ${DIM}  • Live emails sent between agents${NC}"
-  echo -e "  ${DIM}  • Policy guardrails fired on 4 violation attempts${NC}"
-  echo -e "  ${DIM}  • Auth rejected 3 unauthorized callers${NC}"
-  echo -e "  ${DIM}  • Tenant isolation blocked all cross-org attempts${NC}"
-  echo -e "  ${DIM}  • Idempotency key deduplicated a replayed send${NC}"
-  echo -e "  ${DIM}  • Event log queried with type filter + cursor pagination${NC}"
-  echo -e "  ${DIM}  • Agent archived + resource deprovisioned cleanly${NC}"
+  info "Hero agent:      $AGENT_CONCIERGE"
+  info "Email inbox:     $CONCIERGE_EMAIL"
+  if [[ "$CARD_DEMO_RAN" == "true" ]]; then
+    info "Card providerRef: $CARD_PROVIDER_REF"
+    info "Card last4:       $CARD_LAST4"
+  fi
+  if [[ "$CARD_WEBHOOKS_RECORDED" == "true" ]]; then
+    info "Card activity:    authorization $AUTHORIZATION_ID -> transaction $TRANSACTION_ID"
+  fi
+  if [[ "${#SKIP_NOTES[@]}" -gt 0 ]]; then
+    echo ""
+    info "Skipped items:"
+    for note in "${SKIP_NOTES[@]}"; do
+      info "  - $note"
+    done
+  fi
   echo ""
   exit 0
-else
-  echo -e "${RED}${BOLD}  ✗  $FAIL_COUNT check(s) failed — see details above.${NC}"
-  echo ""
-  echo -e "  ${YELLOW}Common causes:${NC}"
-  echo -e "  ${DIM}  • Server not started with AGENTMAIL_API_KEY + AGENTMAIL_WEBHOOK_SECRET${NC}"
-  echo -e "  ${DIM}  • Database not running (docker compose up -d)${NC}"
-  echo -e "  ${DIM}  • Migrations not applied (npm run db:migrate)${NC}"
-  echo ""
-  exit 1
 fi
+
+echo -e "${RED}${BOLD}Demo finished with failing checks.${NC}"
+echo ""
+if [[ "${#SKIP_NOTES[@]}" -gt 0 ]]; then
+  info "Skipped items:"
+  for note in "${SKIP_NOTES[@]}"; do
+    info "  - $note"
+  done
+  echo ""
+fi
+exit 1
