@@ -517,18 +517,20 @@ void test('POST /agents/:id/actions/issue_card rejects invalid Stripe spending c
   const restoreAgents = installAgentsDalMock({ findById: () => Promise.resolve(agent) });
 
   try {
-    const response = await server.inject({
-      method: 'POST',
-      url: '/agents/agt_123/actions/issue_card',
-      headers: { authorization: authorizationHeader },
-      payload: {
-        spending_limits: [{ amount: 5000, interval: 'per_authorization' }],
-        allowed_categories: ['not_a_real_category'],
-        allowed_merchant_countries: ['zz'],
-      },
-    });
+    for (const invalidCountryCode of ['zz', 'EU', 'UN']) {
+      const response = await server.inject({
+        method: 'POST',
+        url: '/agents/agt_123/actions/issue_card',
+        headers: { authorization: authorizationHeader },
+        payload: {
+          spending_limits: [{ amount: 5000, interval: 'per_authorization' }],
+          allowed_categories: ['not_a_real_category'],
+          allowed_merchant_countries: [invalidCountryCode],
+        },
+      });
 
-    assert.strictEqual(response.statusCode, 400);
+      assert.strictEqual(response.statusCode, 400);
+    }
   } finally {
     restore();
     restoreAgents();

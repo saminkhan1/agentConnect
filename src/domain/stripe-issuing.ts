@@ -299,14 +299,49 @@ export const STRIPE_ISSUING_ALLOWED_CATEGORY_VALUES = [
   'wrecking_and_salvage_yards',
 ] as const;
 
+export type StripeIssuingAllowedCategory = (typeof STRIPE_ISSUING_ALLOWED_CATEGORY_VALUES)[number];
+
+export const stripeIssuingAllowedCategorySchema = z.enum(STRIPE_ISSUING_ALLOWED_CATEGORY_VALUES);
+
 const regionDisplayNames =
   typeof Intl.DisplayNames === 'function'
     ? new Intl.DisplayNames(['en'], { type: 'region' })
     : null;
 
-export type StripeIssuingAllowedCategory = (typeof STRIPE_ISSUING_ALLOWED_CATEGORY_VALUES)[number];
-
-export const stripeIssuingAllowedCategorySchema = z.enum(STRIPE_ISSUING_ALLOWED_CATEGORY_VALUES);
+// Intl region names include non-country macroregions, reserved codes, and deprecated aliases
+// that are not valid ISO 3166-1 alpha-2 countries for Stripe Issuing spending controls.
+const NON_COUNTRY_REGION_CODES = new Set([
+  'AC',
+  'AN',
+  'BU',
+  'CP',
+  'CQ',
+  'CS',
+  'DD',
+  'DG',
+  'DY',
+  'EA',
+  'EU',
+  'EZ',
+  'FX',
+  'HV',
+  'IC',
+  'NH',
+  'QO',
+  'RH',
+  'SU',
+  'TA',
+  'TP',
+  'UK',
+  'UN',
+  'VD',
+  'XA',
+  'XB',
+  'XK',
+  'YD',
+  'YU',
+  'ZR',
+]);
 
 export function isIso3166Alpha2CountryCode(value: string): boolean {
   const normalized = value.trim().toUpperCase();
@@ -320,7 +355,10 @@ export function isIso3166Alpha2CountryCode(value: string): boolean {
 
   const displayName = regionDisplayNames.of(normalized);
   return (
-    displayName !== undefined && displayName !== normalized && displayName !== 'Unknown Region'
+    displayName !== undefined &&
+    displayName !== normalized &&
+    displayName !== 'Unknown Region' &&
+    !NON_COUNTRY_REGION_CODES.has(normalized)
   );
 }
 
