@@ -15,6 +15,8 @@ const serverEnvSchema = z.object({
   LOG_LEVEL: logLevelSchema.optional().default('info'),
   AGENTMAIL_API_KEY: z.string().trim().min(1).optional(),
   AGENTMAIL_WEBHOOK_SECRET: z.string().trim().min(1).optional(),
+  STRIPE_SECRET_KEY: z.string().trim().min(1).optional(),
+  STRIPE_WEBHOOK_SECRET: z.string().trim().min(1).optional(),
 });
 
 const dbEnvSchema = z.object({

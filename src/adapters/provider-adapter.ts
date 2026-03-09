@@ -8,6 +8,8 @@ export type ProvisionResult = {
   providerRef: string;
   providerOrgId?: string;
   config?: Record<string, unknown>;
+  /** Sensitive fields (e.g. PAN, CVC) returned to the caller once. NEVER persisted. */
+  sensitiveData?: Record<string, unknown>;
 };
 
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type

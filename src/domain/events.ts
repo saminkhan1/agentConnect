@@ -54,6 +54,16 @@ const cardMoneySchema = z
   })
   .loose();
 
+const settledCardMoneySchema = z
+  .object({
+    amount: z.number(),
+    currency: nonEmptyStringSchema.regex(
+      /^[A-Z]{3}$/,
+      'currency must be a 3-letter uppercase code',
+    ),
+  })
+  .loose();
+
 export const eventDataSchemas = {
   [EVENT_TYPES.EMAIL_SENT]: emailBaseDataSchema,
   [EVENT_TYPES.EMAIL_RECEIVED]: emailBaseDataSchema,
@@ -101,7 +111,7 @@ export const eventDataSchemas = {
       transaction_id: optionalNonEmptyStringSchema,
     })
     .loose(),
-  [EVENT_TYPES.PAYMENT_CARD_SETTLED]: cardMoneySchema
+  [EVENT_TYPES.PAYMENT_CARD_SETTLED]: settledCardMoneySchema
     .extend({
       transaction_id: nonEmptyStringSchema,
       authorization_id: optionalNonEmptyStringSchema,

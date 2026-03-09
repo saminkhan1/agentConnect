@@ -55,6 +55,8 @@ function buildFakeEventRecord(overrides?: Record<string, unknown>) {
   };
 }
 
+type EventRecord = ReturnType<typeof buildFakeEventRecord>;
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
@@ -77,6 +79,23 @@ function installResourcesDalMock(methods: {
   return () => {
     if (originalDescriptor) {
       Object.defineProperty(DalFactory.prototype, 'resources', originalDescriptor);
+    }
+  };
+}
+
+function installEventsDalMock(methods: {
+  findByIdempotencyKey?: (idempotencyKey: string) => Promise<EventRecord | null>;
+}) {
+  const originalDescriptor = Object.getOwnPropertyDescriptor(DalFactory.prototype, 'events');
+  Object.defineProperty(DalFactory.prototype, 'events', {
+    configurable: true,
+    get() {
+      return methods;
+    },
+  });
+  return () => {
+    if (originalDescriptor) {
+      Object.defineProperty(DalFactory.prototype, 'events', originalDescriptor);
     }
   };
 }
@@ -245,10 +264,16 @@ void test('POST /agents/:id/actions/send_email returns 200 and emits email.sent 
   const restoreResources = installResourcesDalMock({
     findActiveByAgentIdAndType: (_agentId, _type, _provider) => Promise.resolve(resource),
   });
+  const restoreEvents = installEventsDalMock({
+    findByIdempotencyKey: () => Promise.resolve(null),
+  });
   const restoreAdapter = installAgentMailAdapterMock(server, {
     performAction: (_resource, _action, payload) => {
       performActionCalls.push(payload);
-      return Promise.resolve({});
+      return Promise.resolve({
+        message_id: 'msg_sent_123',
+        thread_id: 'thread_sent_123',
+      });
     },
   });
   const restoreWriter = installEventWriterMock(server, {
@@ -278,6 +303,13 @@ void test('POST /agents/:id/actions/send_email returns 200 and emits email.sent 
     const input = writeEventCalls[0] as Record<string, unknown>;
     assert.strictEqual(input['eventType'], 'email.sent');
     assert.strictEqual(input['idempotencyKey'], 'my-idem-key');
+    const data = input['data'] as Record<string, unknown>;
+    assert.strictEqual(data['message_id'], 'msg_sent_123');
+    assert.strictEqual(data['thread_id'], 'thread_sent_123');
+    assert.strictEqual(data['from'], 'agent@agentmail.to');
+    assert.deepStrictEqual(data['to'], ['user@example.com']);
+    assert.strictEqual(data['subject'], 'Hi');
+    assert.strictEqual(typeof data['request_hash'], 'string');
 
     const payload = JSON.parse(response.payload) as { event: { eventType: string } };
     assert.strictEqual(payload.event.eventType, 'email.sent');
@@ -285,6 +317,7 @@ void test('POST /agents/:id/actions/send_email returns 200 and emits email.sent 
     restore();
     restoreAgents();
     restoreResources();
+    restoreEvents();
     restoreAdapter();
     restoreWriter();
     await server.close();

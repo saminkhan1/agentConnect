@@ -1,8 +1,14 @@
-import { and, desc, eq, gte, InferInsertModel, lt, lte, ne, or } from 'drizzle-orm';
+import { and, desc, eq, gte, InferInsertModel, lt, lte, ne, or, sql } from 'drizzle-orm';
 
 import { db } from './index';
 import { agents, apiKeys, events, orgs, resources } from './schema';
 import type { EventType } from '../domain/events';
+import {
+  buildTimelineItem,
+  type TimelineCursor,
+  type TimelineItem,
+  type TimelineItemKind,
+} from '../domain/timeline';
 
 type NewAgent = InferInsertModel<typeof agents>;
 type NewApiKey = InferInsertModel<typeof apiKeys>;
@@ -19,6 +25,83 @@ type EventCursor = {
   occurredAt: Date;
   id: string;
 };
+
+type TimelineGroupRow = {
+  itemId: string;
+  itemKind: TimelineItemKind;
+  groupKey: string;
+  occurredAt: Date | string;
+};
+
+type TimelineEventRow = {
+  itemId: string;
+  itemKind: TimelineItemKind;
+  groupKey: string;
+  eventId: string;
+  orgId: string;
+  agentId: string;
+  resourceId: string | null;
+  provider: string;
+  providerEventId: string | null;
+  eventType: EventType;
+  occurredAt: Date | string;
+  idempotencyKey: string | null;
+  data: Record<string, unknown>;
+  ingestedAt: Date | string;
+};
+
+// Older action-generated email.sent rows may lack thread_id, so inherit it
+// from sibling email events with the same provider-scoped message_id.
+const resolvedEmailThreadIdSql = sql`
+  coalesce(
+    nullif(e.data->>'thread_id', ''),
+    max(nullif(e.data->>'thread_id', '')) over (
+      partition by e.provider, nullif(e.data->>'message_id', '')
+    )
+  )
+`;
+
+const cardActivityGroupKeySql = sql`
+  coalesce(
+    nullif(e.data->>'authorization_id', ''),
+    nullif(e.data->>'transaction_id', '')
+  )
+`;
+
+const emailThreadEventTypesSql = sql`e.event_type in (
+  'email.sent',
+  'email.received',
+  'email.delivered',
+  'email.bounced',
+  'email.complained',
+  'email.rejected'
+)`;
+
+const cardActivityEventTypesSql = sql`e.event_type in (
+  'payment.card.authorized',
+  'payment.card.declined',
+  'payment.card.settled'
+)`;
+
+const timelineItemKindSql = sql`
+  case
+    when ${emailThreadEventTypesSql} and ${resolvedEmailThreadIdSql} is not null then 'email_thread'
+    when ${cardActivityEventTypesSql} and ${cardActivityGroupKeySql} is not null then 'card_activity'
+    else 'event'
+  end
+`;
+
+const timelineGroupKeySql = sql`
+  case
+    when ${emailThreadEventTypesSql} and ${resolvedEmailThreadIdSql} is not null then ${resolvedEmailThreadIdSql}
+    when ${cardActivityEventTypesSql} and ${cardActivityGroupKeySql} is not null then ${cardActivityGroupKeySql}
+    else e.id::text
+  end
+`;
+
+function normalizeDate(value: Date | string): Date {
+  return value instanceof Date ? value : new Date(value);
+}
 
 function requireOrgId(orgId: string): string {
   if (orgId.trim().length === 0) {
@@ -138,6 +221,15 @@ export class EventDal {
     return result[0];
   }
 
+  async findByIdempotencyKey(idempotencyKey: string): Promise<EventRecord | null> {
+    const result = await db
+      .select()
+      .from(events)
+      .where(and(eq(events.orgId, this.orgId), eq(events.idempotencyKey, idempotencyKey)))
+      .limit(1);
+    return result[0] ?? null;
+  }
+
   async listByAgent(
     agentId: string,
     options: {
@@ -179,6 +271,168 @@ export class EventDal {
       .where(and(...conditions))
       .orderBy(desc(events.occurredAt), desc(events.id))
       .limit(options.limit);
+  }
+
+  async listTimelineByAgent(
+    agentId: string,
+    options: {
+      since?: Date;
+      until?: Date;
+      cursor?: TimelineCursor;
+      limit: number;
+    },
+  ): Promise<TimelineItem[]> {
+    const filters = [sql`e.org_id = ${this.orgId}`, sql`e.agent_id = ${agentId}`];
+
+    if (options.since) {
+      filters.push(sql`e.occurred_at >= ${options.since}`);
+    }
+
+    if (options.until) {
+      filters.push(sql`e.occurred_at <= ${options.until}`);
+    }
+
+    const cursorFilter = options.cursor
+      ? sql`
+          where (
+            grouped_items."occurredAt" < ${options.cursor.occurredAt}
+            or (
+              grouped_items."occurredAt" = ${options.cursor.occurredAt}
+              and grouped_items."itemId" < ${options.cursor.id}
+            )
+          )
+        `
+      : sql.empty();
+
+    const groupedResult = await db.execute<TimelineGroupRow>(sql`
+      with derived_events as (
+        select
+          ${timelineItemKindSql} as "itemKind",
+          ${timelineGroupKeySql} as "groupKey",
+          e.occurred_at as "occurredAt"
+        from events e
+        where ${sql.join(filters, sql` and `)}
+      ),
+      grouped_items as (
+        select
+          "itemKind",
+          "groupKey",
+          -- Keep this base64url transform aligned with encodeTimelineItemId():
+          -- translate('/+', '_-') maps '/' -> '_' and '+' -> '-'.
+          rtrim(
+            translate(
+              encode(convert_to(array_to_json(array["itemKind", "groupKey"])::text, 'UTF8'), 'base64'),
+              '/+',
+              '_-'
+            ),
+            '='
+          ) as "itemId",
+          max("occurredAt") as "occurredAt"
+        from derived_events
+        group by "itemKind", "groupKey"
+      )
+      select
+        grouped_items."itemId",
+        grouped_items."itemKind",
+        grouped_items."groupKey",
+        grouped_items."occurredAt"
+      from grouped_items
+      ${cursorFilter}
+      order by grouped_items."occurredAt" desc, grouped_items."itemId" desc
+      limit ${options.limit}
+    `);
+
+    const groupedRows = groupedResult.rows;
+    if (groupedRows.length === 0) {
+      return [];
+    }
+
+    const selectedGroups = sql.join(
+      groupedRows.map(
+        (row) => sql`(${row.itemId}, ${row.itemKind}, ${row.groupKey}, ${row.occurredAt})`,
+      ),
+      sql`, `,
+    );
+
+    const eventsResult = await db.execute<TimelineEventRow>(sql`
+      with derived_events as (
+        select
+          ${timelineItemKindSql} as "itemKind",
+          ${timelineGroupKeySql} as "groupKey",
+          e.id as "eventId",
+          e.org_id as "orgId",
+          e.agent_id as "agentId",
+          e.resource_id as "resourceId",
+          e.provider as "provider",
+          e.provider_event_id as "providerEventId",
+          e.event_type as "eventType",
+          e.occurred_at as "occurredAt",
+          e.idempotency_key as "idempotencyKey",
+          e.data as "data",
+          e.ingested_at as "ingestedAt"
+        from events e
+        where ${sql.join(filters, sql` and `)}
+      ),
+      selected_groups("itemId", "itemKind", "groupKey", "itemOccurredAt") as (
+        values ${selectedGroups}
+      )
+      select
+        selected_groups."itemId",
+        selected_groups."itemKind",
+        selected_groups."groupKey",
+        derived_events."eventId",
+        derived_events."orgId",
+        derived_events."agentId",
+        derived_events."resourceId",
+        derived_events."provider",
+        derived_events."providerEventId",
+        derived_events."eventType",
+        derived_events."occurredAt",
+        derived_events."idempotencyKey",
+        derived_events."data",
+        derived_events."ingestedAt"
+      from derived_events
+      join selected_groups
+        on derived_events."itemKind" = selected_groups."itemKind"
+        and derived_events."groupKey" = selected_groups."groupKey"
+      order by
+        selected_groups."itemOccurredAt" desc,
+        selected_groups."itemId" desc,
+        derived_events."occurredAt" desc,
+        derived_events."eventId" desc
+    `);
+
+    const eventsByItemId = new Map<string, EventRecord[]>();
+    for (const row of eventsResult.rows) {
+      let groupedEvents = eventsByItemId.get(row.itemId);
+      if (!groupedEvents) {
+        groupedEvents = [];
+        eventsByItemId.set(row.itemId, groupedEvents);
+      }
+
+      groupedEvents.push({
+        id: row.eventId,
+        orgId: row.orgId,
+        agentId: row.agentId,
+        resourceId: row.resourceId,
+        provider: row.provider,
+        providerEventId: row.providerEventId,
+        eventType: row.eventType,
+        occurredAt: normalizeDate(row.occurredAt),
+        idempotencyKey: row.idempotencyKey,
+        data: row.data,
+        ingestedAt: normalizeDate(row.ingestedAt),
+      });
+    }
+
+    return groupedRows.flatMap((row) => {
+      const groupedEvents = eventsByItemId.get(row.itemId);
+      if (!groupedEvents) {
+        return [];
+      }
+
+      return [buildTimelineItem(row.itemKind, row.groupKey, groupedEvents, row.itemId)];
+    });
   }
 }
 

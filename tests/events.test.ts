@@ -3,13 +3,13 @@ import test from 'node:test';
 import { z } from 'zod';
 
 import { buildServer } from '../src/api/server';
-import { DalFactory } from '../src/db/dal';
 import { EVENT_TYPES, eventTypeSchema, validateEventData } from '../src/domain/events';
 import {
-  FIXED_TIMESTAMP,
   buildAgentRecord,
+  buildEventRecord,
   installAgentsDalMock,
   installAuthApiKey,
+  installEventsDalMock,
 } from './helpers';
 
 const errorResponseSchema = z.object({
@@ -35,67 +35,6 @@ const listEventsResponseSchema = z.object({
   nextCursor: z.string().nullable(),
 });
 
-type EventRecord = {
-  id: string;
-  orgId: string;
-  agentId: string;
-  resourceId: string | null;
-  provider: string;
-  providerEventId: string | null;
-  eventType: string;
-  occurredAt: Date;
-  idempotencyKey: string | null;
-  data: Record<string, unknown>;
-  ingestedAt: Date;
-};
-
-function buildEventRecord(overrides?: Partial<EventRecord>): EventRecord {
-  return {
-    id: '11111111-1111-4111-8111-111111111111',
-    orgId: 'org_123',
-    agentId: 'agt_123',
-    resourceId: null,
-    provider: 'agentmail',
-    providerEventId: 'evt_provider_1',
-    eventType: EVENT_TYPES.EMAIL_DELIVERED,
-    occurredAt: FIXED_TIMESTAMP,
-    idempotencyKey: null,
-    data: {
-      message_id: 'msg_1',
-      thread_id: 'thr_1',
-    },
-    ingestedAt: FIXED_TIMESTAMP,
-    ...overrides,
-  };
-}
-
-function installEventsDalMock(methods: {
-  listByAgent?: (
-    agentId: string,
-    options: {
-      eventType?: string;
-      since?: Date;
-      until?: Date;
-      cursor?: { occurredAt: Date; id: string };
-      limit: number;
-    },
-  ) => Promise<EventRecord[]>;
-}) {
-  const originalDescriptor = Object.getOwnPropertyDescriptor(DalFactory.prototype, 'events');
-  Object.defineProperty(DalFactory.prototype, 'events', {
-    configurable: true,
-    get() {
-      return methods;
-    },
-  });
-
-  return () => {
-    if (originalDescriptor) {
-      Object.defineProperty(DalFactory.prototype, 'events', originalDescriptor);
-    }
-  };
-}
-
 void test('event registry accepts canonical email payloads with extra provider metadata', () => {
   const parsedPayload = validateEventData(EVENT_TYPES.EMAIL_SENT, {
     message_id: 'msg_123',
@@ -120,6 +59,19 @@ void test('event registry enforces required canonical card fields', () => {
       currency: 'USD',
     });
   });
+});
+
+void test('event registry accepts signed settlement amounts for card refunds', () => {
+  const parsedPayload = validateEventData(EVENT_TYPES.PAYMENT_CARD_SETTLED, {
+    transaction_id: 'ipi_refund_001',
+    authorization_id: 'iauth_001',
+    amount: -12,
+    currency: 'USD',
+    transaction_type: 'refund',
+  });
+
+  assert.strictEqual(parsedPayload.amount, -12);
+  assert.strictEqual(parsedPayload.transaction_type, 'refund');
 });
 
 void test('GET /agents/:id/events returns 404 when the scoped agent does not exist', async () => {

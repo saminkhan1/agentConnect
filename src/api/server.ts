@@ -10,6 +10,7 @@ import eventsRoutes from './routes/events';
 import healthRoutes from './routes/health';
 import orgRoutes from './routes/orgs';
 import resourceRoutes from './routes/resources';
+import timelineRoutes from './routes/timeline';
 import webhookRoutes from './routes/webhooks';
 import authPlugin from '../plugins/auth';
 import { getServerConfig } from '../config';
@@ -63,6 +64,7 @@ export async function buildServer() {
   await server.register(orgRoutes);
   await server.register(agentsRoutes);
   await server.register(eventsRoutes);
+  await server.register(timelineRoutes);
   await server.register(resourceRoutes);
   await server.register(actionsRoutes);
 

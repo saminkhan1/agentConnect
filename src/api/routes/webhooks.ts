@@ -31,6 +31,30 @@ const webhookRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
     return reply.code(200).send({ ok: true });
   });
 
+  server.post('/webhooks/stripe', {}, async (request, reply) => {
+    const rawBody = request.body as Buffer;
+    const adapter = server.stripeAdapter;
+    if (!adapter) {
+      return reply.code(500).send({ message: 'Stripe not configured' });
+    }
+
+    const isValid = await adapter.verifyWebhook(rawBody, request.headers as Record<string, string>);
+    if (!isValid) {
+      request.log.warn('Stripe webhook signature verification failed');
+      return reply.code(401).send({ message: 'Invalid webhook signature' });
+    }
+
+    // Process synchronously (MVP — no queue yet); return 200 even on processing error
+    try {
+      const events = await adapter.parseWebhook(rawBody, request.headers as Record<string, string>);
+      await server.webhookProcessor.processEvents('stripe', events);
+    } catch (err) {
+      request.log.error({ err }, 'Stripe webhook processing error');
+    }
+
+    return reply.code(200).send({ ok: true });
+  });
+
   done();
 };
 

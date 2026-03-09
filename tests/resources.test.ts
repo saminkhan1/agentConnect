@@ -188,6 +188,44 @@ void test('POST /agents/:id/resources returns 404 when agent not found', async (
   }
 });
 
+void test('POST /agents/:id/resources returns 400 for Stripe card provisioning', async () => {
+  const server = await buildServer();
+  const { authorizationHeader, restore } = await installAuthApiKey(server);
+  const agent = buildAgentRecord();
+  let provisionCalls = 0;
+
+  const restoreAgents = installAgentsDalMock({
+    findById: (_id) => Promise.resolve(agent),
+  });
+  const restoreResourceManager = installResourceManagerMock(server, {
+    provision: () => {
+      provisionCalls += 1;
+      return Promise.resolve({
+        resource: buildResourceRecord({ type: 'card', provider: 'stripe' }),
+      });
+    },
+  });
+
+  try {
+    const response = await server.inject({
+      method: 'POST',
+      url: '/agents/agt_123/resources',
+      headers: { authorization: authorizationHeader },
+      payload: { type: 'card', provider: 'stripe', config: {} },
+    });
+
+    assert.strictEqual(response.statusCode, 400);
+    assert.strictEqual(provisionCalls, 0);
+    const payload = JSON.parse(response.payload) as { message: string };
+    assert.ok(payload.message.includes('/agents/:id/actions/issue_card'));
+  } finally {
+    restore();
+    restoreAgents();
+    restoreResourceManager();
+    await server.close();
+  }
+});
+
 void test('POST /agents/:id/resources returns 201 with provisioned resource', async () => {
   const server = await buildServer();
   const { authorizationHeader, restore } = await installAuthApiKey(server);
@@ -198,7 +236,7 @@ void test('POST /agents/:id/resources returns 201 with provisioned resource', as
     findById: (_id) => Promise.resolve(agent),
   });
   const restoreResourceManager = installResourceManagerMock(server, {
-    provision: (_dal, _agentId, _type, _provider, _config) => Promise.resolve(resource),
+    provision: (_dal, _agentId, _type, _provider, _config) => Promise.resolve({ resource }),
   });
 
   try {
