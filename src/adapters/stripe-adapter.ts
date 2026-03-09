@@ -17,9 +17,11 @@ type StripeEventPayload = {
   data: { object: Record<string, unknown> };
 };
 
+type StripeExpandableId = string | { id: string };
+
 type StripeAuthObject = {
   id: string; // iauth_...
-  card: { id: string }; // ic_...
+  card: StripeExpandableId; // ic_...
   approved: boolean;
   amount: number;
   currency: string;
@@ -27,12 +29,18 @@ type StripeAuthObject = {
 
 type StripeTransactionObject = {
   id: string; // ipi_...
-  card: string | { id: string }; // ic_...
+  card: StripeExpandableId; // ic_...
   amount: number;
   currency: string;
-  authorization: string | { id: string } | null;
+  authorization: StripeExpandableId | null;
   type?: 'capture' | 'refund';
 };
+
+function getExpandableId(value: StripeExpandableId | null | undefined): string | undefined {
+  if (typeof value === 'string') return value;
+  if (value && typeof value.id === 'string') return value.id;
+  return undefined;
+}
 
 export class StripeAdapter implements ProviderAdapter {
   readonly providerName = 'stripe';
@@ -176,13 +184,14 @@ export class StripeAdapter implements ProviderAdapter {
 
     if (payload.type === 'issuing_authorization.created') {
       const auth = payload.data.object as StripeAuthObject;
+      const cardId = getExpandableId(auth.card);
       const eventType = auth.approved
         ? EVENT_TYPES.PAYMENT_CARD_AUTHORIZED
         : EVENT_TYPES.PAYMENT_CARD_DECLINED;
 
       return Promise.resolve([
         {
-          resourceRef: auth.card.id,
+          resourceRef: cardId,
           provider: this.providerName,
           providerEventId: payload.id,
           eventType,
@@ -198,12 +207,8 @@ export class StripeAdapter implements ProviderAdapter {
 
     if (payload.type === 'issuing_transaction.created') {
       const txn = payload.data.object as StripeTransactionObject;
-      const cardId = typeof txn.card === 'string' ? txn.card : txn.card.id;
-      const authorizationId = txn.authorization
-        ? typeof txn.authorization === 'string'
-          ? txn.authorization
-          : txn.authorization.id
-        : undefined;
+      const cardId = getExpandableId(txn.card);
+      const authorizationId = getExpandableId(txn.authorization);
 
       return Promise.resolve([
         {

@@ -831,6 +831,34 @@ void test('StripeAdapter.parseWebhook preserves refund sign and type metadata', 
   });
 });
 
+void test('StripeAdapter.parseWebhook accepts string card IDs on authorization webhooks', async () => {
+  const adapter = new StripeAdapter('sk_test_123', 'whsec_test_123');
+  const payload = JSON.stringify({
+    id: 'evt_auth_string_001',
+    type: 'issuing_authorization.created',
+    created: Math.floor(FIXED_TIMESTAMP.getTime() / 1000),
+    data: {
+      object: {
+        id: 'iauth_string_001',
+        card: 'ic_test123',
+        approved: false,
+        amount: 5000,
+        currency: 'usd',
+      },
+    },
+  });
+
+  const [event] = await adapter.parseWebhook(Buffer.from(payload), {});
+  assert.ok(event);
+  assert.strictEqual(event.eventType, 'payment.card.declined');
+  assert.strictEqual(event.resourceRef, 'ic_test123');
+  assert.deepStrictEqual(event.data, {
+    authorization_id: 'iauth_string_001',
+    amount: 5000,
+    currency: 'USD',
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Stripe webhook endpoint tests
 // ---------------------------------------------------------------------------

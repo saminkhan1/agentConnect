@@ -351,6 +351,67 @@ void test('integration: Stripe authorization webhook verifies signature and writ
   }
 });
 
+void test('integration: Stripe authorization webhook accepts string card IDs', async () => {
+  const server = await buildServer();
+  const { orgId, agentId } = await createOrgAndAgent(server, 'Stripe Webhook Auth String Card');
+  const webhookSecret = 'whsec_integration_authorization_string_card';
+
+  server.stripeAdapter = new StripeAdapter('sk_test_123', webhookSecret);
+
+  try {
+    await db.insert(resources).values({
+      id: `res_card_${crypto.randomUUID()}`,
+      orgId,
+      agentId,
+      type: 'card',
+      provider: 'stripe',
+      providerRef: 'ic_webhook_auth_string_123',
+      config: {
+        cardholder_id: 'ich_webhook_auth_string_123',
+        last4: '4242',
+        exp_month: 12,
+        exp_year: 2027,
+      },
+      state: 'active',
+    });
+
+    const body = JSON.stringify({
+      id: 'evt_webhook_auth_string_123',
+      type: 'issuing_authorization.created',
+      created: Date.parse('2026-03-07T12:00:00.000Z') / 1000,
+      data: {
+        object: {
+          id: 'iauth_webhook_string_123',
+          card: 'ic_webhook_auth_string_123',
+          approved: false,
+          amount: 5000,
+          currency: 'usd',
+        },
+      },
+    });
+
+    const response = await server.inject({
+      method: 'POST',
+      url: '/webhooks/stripe',
+      headers: buildStripeWebhookHeaders(body, webhookSecret),
+      payload: body,
+    });
+
+    assert.strictEqual(response.statusCode, 200);
+
+    const storedEvents = await db.select().from(events).where(eq(events.orgId, orgId));
+    assert.strictEqual(storedEvents.length, 1);
+    assert.strictEqual(storedEvents[0].eventType, EVENT_TYPES.PAYMENT_CARD_DECLINED);
+    assert.strictEqual(storedEvents[0].providerEventId, 'evt_webhook_auth_string_123');
+    assert.strictEqual(storedEvents[0].data['authorization_id'], 'iauth_webhook_string_123');
+    assert.strictEqual(storedEvents[0].data['amount'], 5000);
+    assert.strictEqual(storedEvents[0].data['currency'], 'USD');
+  } finally {
+    await cleanupOrg(orgId);
+    await server.close();
+  }
+});
+
 void test('integration: Stripe refund webhook verifies signature and preserves refund amounts', async () => {
   const server = await buildServer();
   const { orgId, agentId } = await createOrgAndAgent(server, 'Stripe Webhook Refund');
