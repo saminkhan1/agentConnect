@@ -8,7 +8,7 @@
 #
 # Full local demo:
 #   source .env
-#   npm run dev
+#   pnpm run dev
 #   source .env
 #   ./demo.sh
 #
@@ -283,7 +283,7 @@ fi
 step "Health check"
 call GET /health
 if [[ "$HTTP_STATUS" != "200" ]]; then
-  abort "Server not responding at ${BASE_URL}. Start it with: source .env && npm run dev"
+  abort "Server not responding at ${BASE_URL}. Start it with: source .env && pnpm run dev"
 fi
 pass "Server is up"
 
@@ -416,7 +416,7 @@ if [[ -z "$CONCIERGE_EMAIL_RESOURCE_ID" ]]; then
   else
     local_message="$(jq_r "$HTTP_BODY" '.message // empty')"
     if [[ "$HTTP_STATUS" == "404" && "$local_message" == *"No adapter for provider: agentmail"* ]]; then
-      abort "AgentMail adapter not configured on the server. Start with: source .env && npm run dev"
+      abort "AgentMail adapter not configured on the server. Start with: source .env && pnpm run dev"
     fi
     fail "HTTP $HTTP_STATUS (expected 201) - Concierge inbox provisioned"
     [[ -n "$local_message" ]] && info "message: $local_message"
@@ -453,7 +453,7 @@ if [[ -z "$APPROVER_EMAIL_RESOURCE_ID" ]]; then
   else
     local_message="$(jq_r "$HTTP_BODY" '.message // empty')"
     if [[ "$HTTP_STATUS" == "404" && "$local_message" == *"No adapter for provider: agentmail"* ]]; then
-      abort "AgentMail adapter not configured on the server. Start with: source .env && npm run dev"
+      abort "AgentMail adapter not configured on the server. Start with: source .env && pnpm run dev"
     fi
     fail "HTTP $HTTP_STATUS (expected 201) - Approver inbox provisioned"
     [[ -n "$local_message" ]] && info "message: $local_message"

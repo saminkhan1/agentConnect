@@ -7,7 +7,7 @@
     "build": "tsc",
     "test": "tsx --test tests/*.test.ts",
     "test:integration": "drizzle-kit migrate && tsx --test tests/*.integration.ts",
-    "verify": "prettier --check . && eslint . && tsc --noEmit && npm run test && npm run  test:integration",
+    "verify": "prettier --check . && eslint . && tsc --noEmit && pnpm run test && pnpm run  test:integration",
     "fix": "eslint . --fix && prettier --write .",
     "prepare": "node scripts/setup-git-hooks.cjs",
     "db:push": "drizzle-kit push --force",
