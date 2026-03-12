@@ -34,9 +34,6 @@ type AgentMailSendResult = {
 };
 
 const ADAPTER_TIMEOUT_MS = 30_000;
-const DISPATCHING_STALE_MS = 5 * 60 * 1000; // 5 minutes
-const AMBIGUOUS_STALE_MS = 30 * 60 * 1000; // 30 minutes
-
 export const MSG_IDEMPOTENCY_DIFFERENT_ACTION =
   'Idempotency key already used for a different action';
 const MSG_IDEMPOTENCY_AMBIGUOUS =
@@ -262,20 +259,7 @@ export async function executeOutboundEmailAction<
     }
 
     if (durableAction.state === 'dispatching' || durableAction.state === 'ambiguous') {
-      if (!isStaleAction(durableAction)) {
-        return reply.code(409).send({ message: MSG_IDEMPOTENCY_AMBIGUOUS });
-      }
-      request.log.warn(
-        { actionId: durableAction.id, state: durableAction.state },
-        'Reclaiming stale outbound action',
-      );
-      const reclaimed = await dal.outboundActions.transitionState(durableAction.id, 'ready', {
-        lastError: null,
-      });
-      if (!reclaimed) {
-        return reply.code(409).send({ message: MSG_IDEMPOTENCY_AMBIGUOUS });
-      }
-      actionRow = reclaimed;
+      return reply.code(409).send({ message: MSG_IDEMPOTENCY_AMBIGUOUS });
     }
 
     if (hadExistingAction) {
@@ -393,13 +377,6 @@ export async function executeOutboundEmailAction<
     buildActionIdempotencyLockKey(orgId, idempotencyKey),
     executeIdempotentAction,
   );
-}
-
-function isStaleAction(action: OutboundActionRecord): boolean {
-  const age = Date.now() - action.updatedAt.getTime();
-  if (action.state === 'dispatching') return age > DISPATCHING_STALE_MS;
-  if (action.state === 'ambiguous') return age > AMBIGUOUS_STALE_MS;
-  return false;
 }
 
 function buildActionIdempotencyLockKey(orgId: string, idempotencyKey: string) {

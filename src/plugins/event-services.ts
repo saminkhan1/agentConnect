@@ -10,7 +10,11 @@ declare module 'fastify' {
 }
 
 const eventServicesPlugin: FastifyPluginCallback = (server, _opts, done) => {
-  const eventWriter = new EventWriter();
+  const eventWriter = new EventWriter({
+    onEventCreated: async (dbExecutor, event) => {
+      await server.outboundWebhookService.enqueueDeliveriesForEvent(dbExecutor, event);
+    },
+  });
 
   server.decorate('eventWriter', eventWriter);
 
@@ -19,5 +23,5 @@ const eventServicesPlugin: FastifyPluginCallback = (server, _opts, done) => {
 
 export default fp(eventServicesPlugin, {
   name: 'event-services',
-  dependencies: ['db'],
+  dependencies: ['db', 'outbound-webhook-services'],
 });

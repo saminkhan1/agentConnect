@@ -33,6 +33,21 @@ const serverEnvSchema = z.object({
   AGENTINFRA_API_KEY: z.string().trim().min(1).optional(),
   MCP_HTTP_ENABLED: booleanFlagSchema.optional().default(false),
   MCP_ALLOWED_ORIGINS: z.string().trim().optional(),
+  OUTBOUND_WEBHOOK_ALLOWED_HOSTS: z.string().trim().optional(),
+  OUTBOUND_WEBHOOK_REQUEST_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(1000)
+    .max(60_000)
+    .optional()
+    .default(10_000),
+  OUTBOUND_WEBHOOK_WORKER_POLL_MS: z.coerce
+    .number()
+    .int()
+    .min(100)
+    .max(60_000)
+    .optional()
+    .default(1_000),
 });
 
 const dbEnvSchema = z.object({

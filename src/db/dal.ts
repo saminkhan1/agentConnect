@@ -1,9 +1,19 @@
 import { and, desc, eq, gte, InferInsertModel, lt, lte, ne, or, sql } from 'drizzle-orm';
 
 import { db } from './index';
-import { agents, apiKeys, events, orgs, outboundActions, resources } from './schema';
+import {
+  agents,
+  apiKeys,
+  events,
+  orgs,
+  outboundActions,
+  resources,
+  webhookDeliveries,
+  webhookSubscriptions,
+} from './schema';
 import type { EventType } from '../domain/events';
 import type { OutboundActionState, OutboundActionType } from '../domain/outbound-actions';
+import type { WebhookDeliveryListRow } from '../domain/outbound-webhooks';
 import {
   buildTimelineItem,
   type TimelineCursor,
@@ -17,12 +27,16 @@ type NewEvent = InferInsertModel<typeof events>;
 type NewOrg = InferInsertModel<typeof orgs>;
 type NewOutboundAction = InferInsertModel<typeof outboundActions>;
 type NewResource = InferInsertModel<typeof resources>;
+type NewWebhookDelivery = InferInsertModel<typeof webhookDeliveries>;
+type NewWebhookSubscription = InferInsertModel<typeof webhookSubscriptions>;
 type AgentRecord = typeof agents.$inferSelect;
 type OrgRecord = typeof orgs.$inferSelect;
 type ApiKeyRecord = typeof apiKeys.$inferSelect;
 type EventRecord = typeof events.$inferSelect;
 type OutboundActionRecord = typeof outboundActions.$inferSelect;
 type ResourceRecord = typeof resources.$inferSelect;
+type WebhookDeliveryRecord = typeof webhookDeliveries.$inferSelect;
+type WebhookSubscriptionRecord = typeof webhookSubscriptions.$inferSelect;
 
 type EventCursor = {
   occurredAt: Date;
@@ -606,6 +620,127 @@ export class ResourceDal {
   }
 }
 
+export class WebhookSubscriptionDal {
+  private readonly orgId: string;
+
+  constructor(orgId: string) {
+    this.orgId = requireOrgId(orgId);
+  }
+
+  async findById(id: string): Promise<WebhookSubscriptionRecord | null> {
+    const result = await db
+      .select()
+      .from(webhookSubscriptions)
+      .where(and(eq(webhookSubscriptions.orgId, this.orgId), eq(webhookSubscriptions.id, id)))
+      .limit(1);
+    return result[0] ?? null;
+  }
+
+  async insert(
+    data: Omit<NewWebhookSubscription, 'orgId' | 'createdAt' | 'updatedAt'>,
+  ): Promise<WebhookSubscriptionRecord> {
+    const now = new Date();
+    const result = await db
+      .insert(webhookSubscriptions)
+      .values({
+        ...data,
+        orgId: this.orgId,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    return result[0];
+  }
+}
+
+export class WebhookDeliveryDal {
+  private readonly orgId: string;
+
+  constructor(orgId: string) {
+    this.orgId = requireOrgId(orgId);
+  }
+
+  async findById(id: string): Promise<WebhookDeliveryRecord | null> {
+    const result = await db
+      .select({
+        delivery: webhookDeliveries,
+      })
+      .from(webhookDeliveries)
+      .innerJoin(
+        webhookSubscriptions,
+        eq(webhookDeliveries.subscriptionId, webhookSubscriptions.id),
+      )
+      .where(and(eq(webhookSubscriptions.orgId, this.orgId), eq(webhookDeliveries.id, id)))
+      .limit(1);
+    return result[0]?.delivery ?? null;
+  }
+
+  async insert(
+    data: Omit<NewWebhookDelivery, 'createdAt' | 'updatedAt'>,
+  ): Promise<WebhookDeliveryRecord> {
+    const now = new Date();
+    const result = await db
+      .insert(webhookDeliveries)
+      .values({
+        ...data,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    return result[0];
+  }
+
+  async listBySubscriptionId(
+    subscriptionId: string,
+    options: { limit: number },
+  ): Promise<WebhookDeliveryListRow[]> {
+    const rows = await db
+      .select({
+        id: webhookDeliveries.id,
+        subscriptionId: webhookDeliveries.subscriptionId,
+        eventId: webhookDeliveries.eventId,
+        attemptCount: webhookDeliveries.attemptCount,
+        lastStatus: webhookDeliveries.lastStatus,
+        nextAttemptAt: webhookDeliveries.nextAttemptAt,
+        lastResponseStatusCode: webhookDeliveries.lastResponseStatusCode,
+        lastResponseBody: webhookDeliveries.lastResponseBody,
+        lastRequestHeaders: webhookDeliveries.lastRequestHeaders,
+        lastPayload: webhookDeliveries.lastPayload,
+        lastError: webhookDeliveries.lastError,
+        deliveredAt: webhookDeliveries.deliveredAt,
+        createdAt: webhookDeliveries.createdAt,
+        updatedAt: webhookDeliveries.updatedAt,
+        eventType: events.eventType,
+        agentId: events.agentId,
+        resourceId: events.resourceId,
+        occurredAt: events.occurredAt,
+      })
+      .from(webhookDeliveries)
+      .innerJoin(
+        webhookSubscriptions,
+        eq(webhookDeliveries.subscriptionId, webhookSubscriptions.id),
+      )
+      .innerJoin(events, eq(webhookDeliveries.eventId, events.id))
+      .where(
+        and(
+          eq(webhookSubscriptions.orgId, this.orgId),
+          eq(webhookDeliveries.subscriptionId, subscriptionId),
+        ),
+      )
+      .orderBy(desc(webhookDeliveries.updatedAt), desc(webhookDeliveries.id))
+      .limit(options.limit);
+
+    return rows.map((row) => ({
+      ...row,
+      lastRequestHeaders: row.lastRequestHeaders,
+      lastPayload: row.lastPayload ?? null,
+      lastError: row.lastError ?? null,
+      deliveredAt: row.deliveredAt ?? null,
+      resourceId: row.resourceId ?? null,
+    }));
+  }
+}
+
 export class DalFactory {
   private readonly orgId: string;
 
@@ -631,6 +766,14 @@ export class DalFactory {
 
   get outboundActions() {
     return new OutboundActionDal(this.orgId);
+  }
+
+  get webhookSubscriptions() {
+    return new WebhookSubscriptionDal(this.orgId);
+  }
+
+  get webhookDeliveries() {
+    return new WebhookDeliveryDal(this.orgId);
   }
 }
 

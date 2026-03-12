@@ -162,11 +162,7 @@ function normalizeReplyToHashValue(value: EmailAddressInput | undefined) {
     return [];
   }
 
-  if (typeof value === 'string') {
-    return normalizeOptionalString(value);
-  }
-
-  return normalizeSortedStringArray(value);
+  return normalizeSortedStringArray(typeof value === 'string' ? [value] : value);
 }
 
 function parseSendEmailActionRequestData(value: unknown): SendEmailActionRequestData | null {

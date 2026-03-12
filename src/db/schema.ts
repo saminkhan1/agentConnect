@@ -3,6 +3,7 @@ import {
   boolean,
   foreignKey,
   index,
+  integer,
   jsonb,
   pgEnum,
   pgTable,
@@ -32,6 +33,21 @@ export const outboundActionStateEnum = pgEnum('outbound_action_state', [
   'provider_succeeded',
   'completed',
   'ambiguous',
+]);
+export const webhookSubscriptionDeliveryModeEnum = pgEnum('webhook_subscription_delivery_mode', [
+  'canonical_event',
+  'openclaw_hook_agent',
+  'openclaw_hook_wake',
+]);
+export const webhookSubscriptionStatusEnum = pgEnum('webhook_subscription_status', [
+  'active',
+  'paused',
+]);
+export const webhookDeliveryStatusEnum = pgEnum('webhook_delivery_status', [
+  'pending',
+  'retry_scheduled',
+  'delivered',
+  'failed',
 ]);
 
 export const orgs = pgTable('orgs', {
@@ -171,5 +187,69 @@ export const outboundActions = pgTable(
     index('outbound_actions_org_idempotency_key_idx').on(table.orgId, table.idempotencyKey),
     index('outbound_actions_org_agent_idx').on(table.orgId, table.agentId),
     index('outbound_actions_org_state_idx').on(table.orgId, table.state),
+  ],
+);
+
+export const webhookSubscriptions = pgTable(
+  'webhook_subscriptions',
+  {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    orgId: varchar('org_id', { length: 255 })
+      .references(() => orgs.id)
+      .notNull(),
+    url: text('url').notNull(),
+    eventTypes: text('event_types').array().$type<(typeof eventTypeValues)[number][]>().notNull(),
+    deliveryMode: webhookSubscriptionDeliveryModeEnum('delivery_mode')
+      .notNull()
+      .default('canonical_event'),
+    deliveryConfig: jsonb('delivery_config').$type<Record<string, unknown>>().notNull().default({}),
+    signingSecret: text('signing_secret').notNull(),
+    staticHeaders: jsonb('static_headers').$type<Record<string, string>>().notNull().default({}),
+    status: webhookSubscriptionStatusEnum('status').notNull().default('active'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('webhook_subscriptions_org_status_idx').on(table.orgId, table.status),
+    index('webhook_subscriptions_org_created_at_idx').on(table.orgId, desc(table.createdAt)),
+  ],
+);
+
+export const webhookDeliveries = pgTable(
+  'webhook_deliveries',
+  {
+    id: varchar('id', { length: 255 }).primaryKey(),
+    subscriptionId: varchar('subscription_id', { length: 255 })
+      .references(() => webhookSubscriptions.id, { onDelete: 'cascade' })
+      .notNull(),
+    eventId: uuid('event_id')
+      .references(() => events.id, { onDelete: 'cascade' })
+      .notNull(),
+    attemptCount: integer('attempt_count').notNull().default(0),
+    lastStatus: webhookDeliveryStatusEnum('last_status').notNull().default('pending'),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).defaultNow().notNull(),
+    lastResponseStatusCode: integer('last_response_status_code'),
+    lastResponseBody: text('last_response_body'),
+    lastRequestHeaders: jsonb('last_request_headers')
+      .$type<Record<string, string>>()
+      .notNull()
+      .default({}),
+    lastPayload: jsonb('last_payload').$type<Record<string, unknown> | null>(),
+    lastError: jsonb('last_error').$type<Record<string, unknown> | null>(),
+    deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+    lockedAt: timestamp('locked_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('webhook_deliveries_subscription_event_unique').on(
+      table.subscriptionId,
+      table.eventId,
+    ),
+    index('webhook_deliveries_due_idx').on(table.lastStatus, table.nextAttemptAt),
+    index('webhook_deliveries_subscription_updated_at_idx').on(
+      table.subscriptionId,
+      desc(table.updatedAt),
+    ),
   ],
 );

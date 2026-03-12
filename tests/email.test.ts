@@ -13,7 +13,6 @@ import {
   FIXED_TIMESTAMP,
   ResourceRecord,
   buildAgentRecord,
-  buildEventRecord,
   buildOutboundActionRecord,
   buildResourceRecord,
   createMemoryOutboundActionsDal,
@@ -48,6 +47,10 @@ function buildFakeEventRecord(overrides?: Record<string, unknown>) {
 
 type EventRecord = ReturnType<typeof buildFakeEventRecord>;
 
+function normalizeReplyToHashValue(value?: string | string[]) {
+  return [...(typeof value === 'string' ? [value] : (value ?? []))].sort();
+}
+
 function buildSendEmailRequestHash(
   resource: ResourceRecord,
   payload: {
@@ -71,10 +74,7 @@ function buildSendEmailRequestHash(
         subject: payload.subject,
         text: payload.text,
         html: payload.html ?? '',
-        reply_to:
-          typeof payload.reply_to === 'string'
-            ? payload.reply_to
-            : [...(payload.reply_to ?? [])].sort(),
+        reply_to: normalizeReplyToHashValue(payload.reply_to),
       }),
     )
     .digest('hex');
@@ -101,10 +101,7 @@ function buildReplyEmailRequestHash(
         html: payload.html ?? '',
         cc: [...(payload.cc ?? [])].sort(),
         bcc: [...(payload.bcc ?? [])].sort(),
-        reply_to:
-          typeof payload.reply_to === 'string'
-            ? payload.reply_to
-            : [...(payload.reply_to ?? [])].sort(),
+        reply_to: normalizeReplyToHashValue(payload.reply_to),
       }),
     )
     .digest('hex');
@@ -507,6 +504,89 @@ void test('POST /agents/:id/actions/send_email accepts multiple reply_to address
 
     const payload = performActionCalls[0] as Record<string, unknown>;
     assert.deepStrictEqual(payload['replyTo'], ['reply-one@example.com', 'reply-two@example.com']);
+  } finally {
+    restore();
+    restoreAgents();
+    restoreResources();
+    restoreEvents();
+    restoreOutboundActions();
+    restoreAdapter();
+    restoreWriter();
+    await server.close();
+  }
+});
+
+void test('POST /agents/:id/actions/send_email treats scalar and array reply_to as the same idempotent request', async () => {
+  const server = await buildServer();
+  const { authorizationHeader, restore } = await installAuthApiKey(server);
+  const agent = buildAgentRecord();
+  const resource = buildResourceRecord();
+
+  let storedEvent: EventRecord | null = null;
+  let performActionCalls = 0;
+  let writeEventCalls = 0;
+
+  const restoreAgents = installAgentsDalMock({ findById: (_id) => Promise.resolve(agent) });
+  const restoreResources = installResourcesDalMock({
+    findActiveByAgentIdAndType: (_agentId, _type, _provider) => Promise.resolve(resource),
+  });
+  const outboundActions = createMemoryOutboundActionsDal();
+  const restoreEvents = installEventsDalMock({
+    findById: (id) => Promise.resolve(storedEvent && storedEvent.id === id ? storedEvent : null),
+    findByIdempotencyKey: () => Promise.resolve(storedEvent),
+  });
+  const restoreOutboundActions = installOutboundActionsDalMock(outboundActions.methods);
+  const restoreAdapter = installAgentMailAdapterMock(server, {
+    performAction: (_resource, action) => {
+      assert.strictEqual(action, 'send_email');
+      performActionCalls += 1;
+      return Promise.resolve({
+        message_id: 'msg_send_reply_to_equivalent',
+        thread_id: 'thread_send_reply_to_equivalent',
+      });
+    },
+  });
+  const restoreWriter = installEventWriterMock(server, {
+    writeEvent: (input) => {
+      writeEventCalls += 1;
+      storedEvent = buildFakeEventRecord({
+        idempotencyKey: 'idem-send-reply-to-equivalent',
+        data: input.data as Record<string, unknown>,
+      });
+      return Promise.resolve({ event: storedEvent, wasCreated: true } as WriteEventResult);
+    },
+  });
+
+  try {
+    const first = await server.inject({
+      method: 'POST',
+      url: '/agents/agt_123/actions/send_email',
+      headers: { authorization: authorizationHeader },
+      payload: {
+        to: ['user@example.com'],
+        subject: 'Hi',
+        text: 'Hello',
+        reply_to: 'reply@example.com',
+        idempotency_key: 'idem-send-reply-to-equivalent',
+      },
+    });
+    assert.strictEqual(first.statusCode, 200);
+
+    const second = await server.inject({
+      method: 'POST',
+      url: '/agents/agt_123/actions/send_email',
+      headers: { authorization: authorizationHeader },
+      payload: {
+        to: ['user@example.com'],
+        subject: 'Hi',
+        text: 'Hello',
+        reply_to: ['reply@example.com'],
+        idempotency_key: 'idem-send-reply-to-equivalent',
+      },
+    });
+    assert.strictEqual(second.statusCode, 200);
+    assert.strictEqual(performActionCalls, 1);
+    assert.strictEqual(writeEventCalls, 1);
   } finally {
     restore();
     restoreAgents();
@@ -1630,6 +1710,108 @@ void test('POST /agents/:id/actions/reply_email accepts multiple reply_to addres
       'reply-one@example.com',
       'reply-two@example.com',
     ]);
+  } finally {
+    restore();
+    restoreAgents();
+    restoreResources();
+    restoreEvents();
+    restoreOutboundActions();
+    restoreAdapter();
+    restoreWriter();
+    await server.close();
+  }
+});
+
+void test('POST /agents/:id/actions/reply_email treats scalar and array reply_to as the same idempotent request', async () => {
+  const server = await buildServer();
+  const { authorizationHeader, restore } = await installAuthApiKey(server);
+  const agent = buildAgentRecord();
+  const emailResource = buildResourceRecord({
+    id: 'res_email_123',
+    providerRef: 'agent@mail.example.com',
+    providerOrgId: 'pod_123',
+    config: { email_address: 'agent@mail.example.com' },
+  });
+
+  let storedEvent: EventRecord | null = null;
+  let getMessageCalls = 0;
+  let replyCalls = 0;
+  let writeEventCalls = 0;
+
+  const restoreAgents = installAgentsDalMock({ findById: () => Promise.resolve(agent) });
+  const restoreResources = installResourcesDalMock({
+    findActiveByAgentIdAndType: () => Promise.resolve(emailResource),
+  });
+  const outboundActions = createMemoryOutboundActionsDal();
+  const restoreEvents = installEventsDalMock({
+    findById: (id) => Promise.resolve(storedEvent && storedEvent.id === id ? storedEvent : null),
+    findByIdempotencyKey: () => Promise.resolve(storedEvent),
+  });
+  const restoreOutboundActions = installOutboundActionsDalMock(outboundActions.methods);
+  const restoreAdapter = installAgentMailAdapterMock(server, {
+    performAction: (_resource, action, payload) => {
+      if (action === 'get_message') {
+        getMessageCalls += 1;
+        return Promise.resolve({
+          message_id: payload['message_id'],
+          from: 'sender@example.com',
+          reply_to: ['Sender <sender@example.com>'],
+          to: ['agent@mail.example.com'],
+          subject: 'Original subject',
+          text: 'Original text',
+          html: null,
+        });
+      }
+
+      assert.strictEqual(action, 'reply_email');
+      replyCalls += 1;
+      return Promise.resolve({
+        message_id: 'msg_reply_to_equivalent',
+        thread_id: 'thread_reply_to_equivalent',
+      });
+    },
+  });
+  const restoreWriter = installEventWriterMock(server, {
+    writeEvent: (input) => {
+      writeEventCalls += 1;
+      storedEvent = buildFakeEventRecord({
+        idempotencyKey: 'idem-reply-to-equivalent',
+        resourceId: 'res_email_123',
+        data: input.data as Record<string, unknown>,
+      });
+      return Promise.resolve({ event: storedEvent, wasCreated: true } as WriteEventResult);
+    },
+  });
+
+  try {
+    const first = await server.inject({
+      method: 'POST',
+      url: '/agents/agt_123/actions/reply_email',
+      headers: { authorization: authorizationHeader, 'content-type': 'application/json' },
+      payload: {
+        message_id: 'msg_original_001',
+        text: 'Reply text',
+        reply_to: 'reply@example.com',
+        idempotency_key: 'idem-reply-to-equivalent',
+      },
+    });
+    assert.strictEqual(first.statusCode, 200);
+
+    const second = await server.inject({
+      method: 'POST',
+      url: '/agents/agt_123/actions/reply_email',
+      headers: { authorization: authorizationHeader, 'content-type': 'application/json' },
+      payload: {
+        message_id: 'msg_original_001',
+        text: 'Reply text',
+        reply_to: ['reply@example.com'],
+        idempotency_key: 'idem-reply-to-equivalent',
+      },
+    });
+    assert.strictEqual(second.statusCode, 200);
+    assert.strictEqual(getMessageCalls, 1);
+    assert.strictEqual(replyCalls, 1);
+    assert.strictEqual(writeEventCalls, 1);
   } finally {
     restore();
     restoreAgents();
@@ -3179,10 +3361,10 @@ void test('POST /webhooks/agentmail returns 500 when persistence fails after ver
 });
 
 // ---------------------------------------------------------------------------
-// Staleness reclaim tests (P0-2)
+// In-flight action safety tests
 // ---------------------------------------------------------------------------
 
-void test('POST /agents/:id/actions/send_email reclaims a stale dispatching action', async () => {
+void test('POST /agents/:id/actions/send_email returns 409 for a stale dispatching action without resending', async () => {
   const server = await buildServer();
   const { authorizationHeader, restore } = await installAuthApiKey(server);
   const agent = buildAgentRecord();
@@ -3222,17 +3404,6 @@ void test('POST /agents/:id/actions/send_email reclaims a stale dispatching acti
       return Promise.resolve({ message_id: 'msg_reclaimed', thread_id: 'thread_reclaimed' });
     },
   });
-  const restoreWriter = installEventWriterMock(server, {
-    writeEvent: (input) =>
-      Promise.resolve({
-        event: buildEventRecord({
-          eventType: 'email.sent',
-          data: input.data as Record<string, unknown>,
-          idempotencyKey: 'idem-stale-dispatching',
-        }),
-        wasCreated: true,
-      } as WriteEventResult),
-  });
 
   try {
     const response = await server.inject({
@@ -3247,8 +3418,11 @@ void test('POST /agents/:id/actions/send_email reclaims a stale dispatching acti
       },
     });
 
-    assert.strictEqual(response.statusCode, 200);
-    assert.strictEqual(performActionCalls, 1, 'Stale action should be reclaimed and re-dispatched');
+    assert.strictEqual(response.statusCode, 409);
+    assert.deepStrictEqual(response.json(), {
+      message: 'A previous email attempt may already have been dispatched for this idempotency key',
+    });
+    assert.strictEqual(performActionCalls, 0);
   } finally {
     restore();
     restoreAgents();
@@ -3257,7 +3431,77 @@ void test('POST /agents/:id/actions/send_email reclaims a stale dispatching acti
     restoreOutboundActions();
     restoreAdvisoryLock();
     restoreAdapter();
-    restoreWriter();
+    await server.close();
+  }
+});
+
+void test('POST /agents/:id/actions/send_email returns 409 for a stale ambiguous action without resending', async () => {
+  const server = await buildServer();
+  const { authorizationHeader, restore } = await installAuthApiKey(server);
+  const agent = buildAgentRecord();
+  const resource = buildResourceRecord();
+  const staleTime = new Date(Date.now() - 40 * 60 * 1000); // 40 minutes ago
+
+  let performActionCalls = 0;
+
+  const requestHash = buildSendEmailRequestHash(resource, {
+    to: ['user@example.com'],
+    subject: 'Hi',
+    text: 'Hello',
+  });
+
+  const restoreAgents = installAgentsDalMock({ findById: () => Promise.resolve(agent) });
+  const restoreResources = installResourcesDalMock({
+    findActiveByAgentIdAndType: () => Promise.resolve(resource),
+  });
+  const restoreEvents = installEventsDalMock({
+    findById: () => Promise.resolve(null),
+    findByIdempotencyKey: () => Promise.resolve(null),
+  });
+  const outboundActions = createMemoryOutboundActionsDal({
+    initialAction: buildOutboundActionRecord({
+      state: 'ambiguous',
+      idempotencyKey: 'idem-stale-ambiguous',
+      requestHash,
+      requestData: { to: ['user@example.com'], subject: 'Hi', text: 'Hello' },
+      updatedAt: staleTime,
+    }),
+  });
+  const restoreOutboundActions = installOutboundActionsDalMock(outboundActions.methods);
+  const restoreAdvisoryLock = installAdvisoryLockMock(server);
+  const restoreAdapter = installAgentMailAdapterMock(server, {
+    performAction: () => {
+      performActionCalls += 1;
+      return Promise.resolve({ message_id: 'msg_should_not_resend' });
+    },
+  });
+
+  try {
+    const response = await server.inject({
+      method: 'POST',
+      url: '/agents/agt_123/actions/send_email',
+      headers: { authorization: authorizationHeader },
+      payload: {
+        to: ['user@example.com'],
+        subject: 'Hi',
+        text: 'Hello',
+        idempotency_key: 'idem-stale-ambiguous',
+      },
+    });
+
+    assert.strictEqual(response.statusCode, 409);
+    assert.deepStrictEqual(response.json(), {
+      message: 'A previous email attempt may already have been dispatched for this idempotency key',
+    });
+    assert.strictEqual(performActionCalls, 0);
+  } finally {
+    restore();
+    restoreAgents();
+    restoreResources();
+    restoreEvents();
+    restoreOutboundActions();
+    restoreAdvisoryLock();
+    restoreAdapter();
     await server.close();
   }
 });

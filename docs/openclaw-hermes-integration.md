@@ -9,11 +9,11 @@ Official references used for this guide:
 
 ## Executive Summary
 
-| Direction                | Official surface                                                                                           | AgentConnect decision                                                                                                 | Status                                                                   |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| Hermes -> AgentConnect   | Remote MCP server via `mcp_servers` with `url`, `headers`, `timeout`, `connect_timeout`                    | Support directly via hosted HTTP `/mcp` and local stdio MCP. Keep MCP as a thin facade over existing routes/services. | Partial: transport exists; strict Hermes conformance gate still required |
-| OpenClaw -> AgentConnect | OpenClaw operator workflows over authenticated Gateway HTTP calls                                          | OpenClaw workflows call AgentConnect REST APIs with stable idempotency keys.                                          | Supported now                                                            |
-| AgentConnect -> OpenClaw | OpenClaw hooks (`POST /hooks/agent`, `POST /hooks/wake`) with dedicated hook auth and routing restrictions | Phase E2 adds outbound auth-header support plus bounded OpenClaw delivery modes. No generic workflow engine.          | Not complete yet                                                         |
+| Direction                | Official surface                                                                                           | AgentConnect decision                                                                                                   | Status                                                                                                |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| Hermes -> AgentConnect   | Remote MCP server via `mcp_servers` with `url`, `headers`, `timeout`, `connect_timeout`                    | Support directly via hosted HTTP `/mcp` and local stdio MCP. Keep MCP as a thin facade over existing routes/services.   | Verified in automated conformance tests; hosted staging smoke still required before production claims |
+| OpenClaw -> AgentConnect | OpenClaw operator workflows over authenticated Gateway HTTP calls                                          | OpenClaw workflows call AgentConnect REST APIs with stable idempotency keys.                                            | Supported now                                                                                         |
+| AgentConnect -> OpenClaw | OpenClaw hooks (`POST /hooks/agent`, `POST /hooks/wake`) with dedicated hook auth and routing restrictions | Outbound webhook subscriptions deliver canonical events or bounded OpenClaw hook envelopes. No generic workflow engine. | Verified in automated conformance tests; staging smoke still required before production claims        |
 
 ## Architecture Guardrails
 
@@ -124,13 +124,52 @@ Current REST calls from OpenClaw workflows map cleanly to AgentConnect:
 - Card issuance: `POST /agents/:id/actions/issue_card`
 - Observability: `GET /agents/:id/events`, `GET /agents/:id/timeline`
 
-To support direct AgentConnect -> OpenClaw delivery in Phase E2, outbound subscriptions need:
+Direct AgentConnect -> OpenClaw delivery is exposed as root-key managed outbound subscriptions:
 
-- Static outbound auth headers so requests can include either `Authorization: Bearer ...` or `x-openclaw-token: ...`
-- A bounded `delivery_mode` enum
-- At least one OpenClaw hook envelope format
-- Delivery dedupe on `(subscription_id, event_id)`
-- Retry semantics that treat transient auth/rate-limit/server failures differently from stable payload failures
+- `POST /webhook-subscriptions`
+- `GET /webhook-subscriptions/:id/deliveries`
+
+Implemented delivery behavior:
+
+- `delivery_mode` is bounded to `canonical_event`, `openclaw_hook_agent`, and `openclaw_hook_wake`
+- Static outbound auth headers are bounded to `Authorization` and `x-openclaw-token`
+- OpenClaw modes support the official hook contracts under the configured OpenClaw hook base path:
+  - `openclaw_hook_agent` -> default example `POST /hooks/agent`
+  - `openclaw_hook_wake` -> default example `POST /hooks/wake`
+- Mapped hooks such as `POST /hooks/<name>` remain unsupported
+- Deliveries are deduped on `(subscription_id, event_id)`
+- Worker retries transient `401`, `429`, network, and `5xx` failures with exponential backoff plus jitter, and honors `Retry-After` on `429` when present
+- Stable `400` payload failures are recorded and not retried forever
+- Every delivery carries `x-agentconnect-*` metadata headers plus an HMAC signature over `${timestamp}.${body}`
+
+Recommended OpenClaw deployment settings:
+
+- Keep the hook endpoint on private ingress or behind strict edge auth
+- Use a dedicated hook token per subscription
+- Prefer gateway-side `allowedAgentIds`
+- Leave `allowRequestSessionKey=false` unless the subscription uses `delivery_config.session_key_prefix`
+- If you enable per-event `sessionKey`, scope OpenClaw with `allowedSessionKeyPrefixes` that match the configured prefix
+
+Example subscription targeting the default `POST /hooks/agent` path:
+
+```json
+{
+  "url": "https://openclaw.example.com/hooks/agent",
+  "event_types": ["email.received", "payment.card.settled"],
+  "delivery_mode": "openclaw_hook_agent",
+  "static_headers": {
+    "authorization": "Bearer oc_hook_token"
+  },
+  "delivery_config": {
+    "agent_id": "assistant_ops",
+    "session_key_prefix": "agentconnect_evt_"
+  }
+}
+```
+
+`openclaw_hook_agent` sends the official OpenClaw body fields and places the canonical event envelope in the `message` string. `openclaw_hook_wake` does the same with the `text` field for wake-only semantics.
+
+If your OpenClaw deployment changes the hook base path, keep the same official agent/wake contract and swap in the configured base path. For example, `/internal/openclaw/agent` is valid for `openclaw_hook_agent` if that deployment exposes the official agent hook there.
 
 ### OpenClaw conformance gate
 
@@ -140,7 +179,7 @@ Phase E is not done until `tests/openclaw-hooks.integration.ts` proves all of th
 2. `openclaw_hook_agent` delivery mode produces the expected hook body shape from a canonical event.
 3. `openclaw_hook_wake` delivery mode does the same when wake-only semantics are desired.
 4. Deliveries are deduped on repeated worker replays for the same `(subscription_id, event_id)`.
-5. Retries occur for transient `401`, `429`, and `5xx` responses according to the worker backoff policy.
+5. Retries occur for transient `401`, `429`, and `5xx` responses according to the worker backoff policy, and `429` honors `Retry-After` when present.
 6. Stable `400` payload failures are recorded and not retried forever.
 7. Subscription docs and examples default to private ingress, dedicated hook tokens, `allowedAgentIds`, and restricted `allowedSessionKeyPrefixes`.
 
@@ -160,6 +199,6 @@ Before claiming Hermes/OpenClaw production support:
 
 These are the remaining gaps relative to the target above:
 
-- Hermes transport and tool surface exist, but the explicit Hermes-branded conformance suite is not yet part of the release gate.
-- Direct AgentConnect -> OpenClaw hook delivery still needs outbound auth-header support and bounded OpenClaw delivery modes.
+- Hermes transport and tool surface now have an explicit real-client conformance suite, but hosted staging smoke against `/mcp` is still required before any production-ready claim.
+- Direct AgentConnect -> OpenClaw hook delivery is implemented and covered by `tests/openclaw-hooks.integration.ts`, but a real staging smoke against an OpenClaw deployment is still required before any production-ready claim.
 - API key expiry/spend bounds/allowed actions, per-key rate limiting, and HMAC request signing remain Phase E3 hardening work.

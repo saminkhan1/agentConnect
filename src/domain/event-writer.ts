@@ -16,6 +16,9 @@ type DuplicateMatches = {
   byProvider: EventRecord | null;
   byIdempotency: EventRecord | null;
 };
+type EventWriterOptions = {
+  onEventCreated?: (dbExecutor: DatabaseTransaction, event: EventRecord) => Promise<void>;
+};
 
 type RawWriteEventInput = {
   orgId: string;
@@ -35,6 +38,7 @@ export type WriteEventResult = {
   wasCreated: boolean;
 };
 export type IngestProviderEventInput = Omit<RawWriteEventInput, 'provider'>;
+export type EventWriterExecutor = DatabaseTransaction;
 export const MAX_INGEST_BATCH_SIZE = 100;
 
 const RETRYABLE_PG_ERROR_CODES = new Set(['40001', '40P01']);
@@ -172,6 +176,8 @@ function getRetryDelayMs(attempt: number): number {
 }
 
 export class EventWriter {
+  constructor(private readonly options: EventWriterOptions = {}) {}
+
   async writeEvent(input: WriteEventInput): Promise<WriteEventResult> {
     return this.withWriteRetries(async () => {
       return db.transaction(async (tx) => this.writeWithExecutor(tx, input));
@@ -251,6 +257,10 @@ export class EventWriter {
       .returning();
 
     if (insertedRows[0]) {
+      if (this.options.onEventCreated) {
+        await this.options.onEventCreated(dbExecutor, insertedRows[0]);
+      }
+
       return {
         event: insertedRows[0],
         wasCreated: true,

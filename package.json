@@ -7,6 +7,7 @@
     "dev": "tsx watch src/api/server.ts",
     "dev:webhooks": "tsx scripts/dev-webhooks.ts",
     "mcp:stdio": "tsx src/mcp-stdio.ts",
+    "worker:webhooks": "tsx src/worker/outbound-webhooks.ts",
     "build": "tsc",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",

@@ -19,12 +19,14 @@ import messagesRoutes from './routes/messages';
 import orgRoutes from './routes/orgs';
 import resourceRoutes from './routes/resources';
 import timelineRoutes from './routes/timeline';
+import webhookSubscriptionRoutes from './routes/webhook-subscriptions';
 import webhookRoutes from './routes/webhooks';
 import authPlugin from '../plugins/auth';
 import { getServerConfig } from '../config';
 import dbPlugin from '../plugins/db';
 import { AppError } from '../domain/errors';
 import eventServicesPlugin from '../plugins/event-services';
+import outboundWebhookServicesPlugin from '../plugins/outbound-webhook-services';
 import resourceServicesPlugin from '../plugins/resource-services';
 import webhookServicesPlugin from '../plugins/webhook-services';
 
@@ -65,6 +67,7 @@ export async function buildServer() {
 
   await server.register(dbPlugin);
   await server.register(authPlugin);
+  await server.register(outboundWebhookServicesPlugin);
   await server.register(eventServicesPlugin);
   await server.register(resourceServicesPlugin);
   await server.register(webhookServicesPlugin);
@@ -89,6 +92,7 @@ export async function buildServer() {
   await server.register(orgRoutes);
   await server.register(agentsRoutes);
   await server.register(eventsRoutes);
+  await server.register(webhookSubscriptionRoutes);
   await server.register(timelineRoutes);
   await server.register(resourceRoutes);
   await server.register(actionsRoutes);
