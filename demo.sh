@@ -13,16 +13,22 @@
 #   ./demo.sh
 #
 # Notes:
-#   - AgentMail must be configured on the server for the email path.
+#   - AgentMail needs AGENTMAIL_API_KEY and AGENTMAIL_WEBHOOK_SECRET on the server.
 #   - Card issuance uses the server's configured Stripe adapter.
+#   - If AGENTMAIL_WEBHOOK_SECRET is exported in this shell, the script can
+#     simulate an official inbound AgentMail webhook for the email thread.
 #   - If STRIPE_WEBHOOK_SECRET is exported in this shell, the script also
 #     simulates signed Stripe authorization and settlement webhooks.
 #   - Set DEMO_SKIP_CARD=1 to run an email-only version.
+#   - Set DEMO_INTERACTIVE=0 to disable the step-through presenter mode.
+#   - Set DEMO_PERSIST_STATE=1 to keep .demo-state between runs.
 
 BASE_URL="${1:-${BASE_URL:-http://localhost:3000}}"
 STATE_FILE="${STATE_FILE:-.demo-state}"
 STATE_VERSION="phase-d-v1"
 RUN_TAG="${RUN_TAG:-$(date '+%Y%m%d-%H%M%S')}"
+DEMO_INTERACTIVE="${DEMO_INTERACTIVE:-auto}"
+DEMO_PERSIST_STATE="${DEMO_PERSIST_STATE:-0}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -37,6 +43,9 @@ PASS_COUNT=0
 FAIL_COUNT=0
 SKIP_COUNT=0
 SKIP_NOTES=()
+INTERACTIVE_MODE=false
+AUTO_ADVANCE=false
+PERSIST_STATE=false
 
 pass() {
   echo -e "  ${GREEN}[OK]${NC} $*"
@@ -76,6 +85,79 @@ section() {
   echo -e "${BOLD}${BLUE}------------------------------------------------------------${NC}"
   echo -e "${BOLD}${BLUE}$1${NC}"
   echo -e "${BOLD}${BLUE}------------------------------------------------------------${NC}"
+}
+
+configure_interactive_mode() {
+  case "$DEMO_INTERACTIVE" in
+    1 | true | TRUE | yes | YES | on | ON)
+      INTERACTIVE_MODE=true
+      ;;
+    0 | false | FALSE | no | NO | off | OFF)
+      INTERACTIVE_MODE=false
+      ;;
+    auto | AUTO | "")
+      if [[ -t 0 && -t 1 ]]; then
+        INTERACTIVE_MODE=true
+      else
+        INTERACTIVE_MODE=false
+      fi
+      ;;
+    *)
+      warn "Unrecognized DEMO_INTERACTIVE=$DEMO_INTERACTIVE; defaulting to auto"
+      if [[ -t 0 && -t 1 ]]; then
+        INTERACTIVE_MODE=true
+      else
+        INTERACTIVE_MODE=false
+      fi
+      ;;
+  esac
+}
+
+pause_for_next() {
+  local prompt="$1"
+  local response=""
+
+  if [[ "$INTERACTIVE_MODE" != "true" || "$AUTO_ADVANCE" == "true" ]]; then
+    return
+  fi
+
+  echo ""
+  echo -e "  ${BOLD}${YELLOW}Next:${NC} $prompt"
+
+  while true; do
+    read -r -p "  Press Enter to continue, 'a' to autoplay, or 'q' to stop: " response
+    case "$response" in
+      "")
+        return
+        ;;
+      a | A)
+        AUTO_ADVANCE=true
+        info "Autoplay enabled for the rest of the demo"
+        return
+        ;;
+      q | Q)
+        abort "Demo stopped by user"
+        ;;
+      *)
+        info "Please press Enter, 'a', or 'q'"
+        ;;
+    esac
+  done
+}
+
+configure_state_persistence() {
+  case "$DEMO_PERSIST_STATE" in
+    1 | true | TRUE | yes | YES | on | ON)
+      PERSIST_STATE=true
+      ;;
+    *)
+      PERSIST_STATE=false
+      ;;
+  esac
+}
+
+clear_state_file() {
+  rm -f "$STATE_FILE"
 }
 
 mask() {
@@ -126,7 +208,13 @@ active_resource_present() {
 }
 
 _TMP="$(mktemp)"
-trap 'rm -f "$_TMP"' EXIT
+cleanup_demo_files() {
+  rm -f "$_TMP"
+  if [[ "$PERSIST_STATE" != "true" ]]; then
+    clear_state_file
+  fi
+}
+trap 'cleanup_demo_files' EXIT
 
 HTTP_STATUS=""
 HTTP_BODY=""
@@ -216,6 +304,10 @@ reset_state() {
 }
 
 save_state() {
+  if [[ "$PERSIST_STATE" != "true" ]]; then
+    return
+  fi
+
   cat >"$STATE_FILE" <<STATEFILE
 DEMO_STATE_VERSION="${STATE_VERSION}"
 SAVED_BASE_URL="${BASE_URL}"
@@ -229,6 +321,30 @@ CONCIERGE_EMAIL="${CONCIERGE_EMAIL:-}"
 APPROVER_EMAIL_RESOURCE_ID="${APPROVER_EMAIL_RESOURCE_ID:-}"
 APPROVER_EMAIL="${APPROVER_EMAIL:-}"
 STATEFILE
+}
+
+delete_resource_if_present() {
+  local agent_id="$1"
+  local resource_id="$2"
+  local auth="$3"
+  local label="$4"
+
+  if [[ -z "$resource_id" || "$resource_id" == "null" ]]; then
+    skip "$label cleanup skipped (no resource to delete)"
+    return
+  fi
+
+  call DELETE "/agents/${agent_id}/resources/${resource_id}" "$auth"
+  if [[ "$HTTP_STATUS" == "200" ]]; then
+    pass "HTTP 200 - $label deleted"
+  elif [[ "$HTTP_STATUS" == "404" ]]; then
+    skip "$label already absent"
+  else
+    fail "HTTP $HTTP_STATUS (expected 200) - Delete $label"
+    local message
+    message="$(jq_r "$HTTP_BODY" '.message // empty')"
+    [[ -n "$message" ]] && info "message: $message"
+  fi
 }
 
 stripe_signature() {
@@ -253,6 +369,76 @@ post_stripe_webhook() {
     "stripe-signature: t=${timestamp},v1=${signature}"
 }
 
+agentmail_signature() {
+  local secret="$1"
+  local msg_id="$2"
+  local timestamp="$3"
+  local payload="$4"
+
+  AGENTMAIL_WEBHOOK_SECRET_INPUT="$secret" \
+    SVIX_MSG_ID="$msg_id" \
+    SVIX_TIMESTAMP="$timestamp" \
+    SVIX_PAYLOAD="$payload" \
+    node <<'NODE'
+const { Webhook } = require('svix');
+
+const secret = process.env.AGENTMAIL_WEBHOOK_SECRET_INPUT || '';
+const msgId = process.env.SVIX_MSG_ID || '';
+const timestampRaw = process.env.SVIX_TIMESTAMP || '';
+const payload = process.env.SVIX_PAYLOAD || '';
+const timestamp = new Date(Number(timestampRaw) * 1000);
+
+process.stdout.write(new Webhook(secret).sign(msgId, timestamp, payload));
+NODE
+}
+
+post_agentmail_webhook() {
+  local payload="$1"
+  local msg_id="$2"
+  local timestamp
+  local signature
+
+  timestamp="$(date +%s)"
+  signature="$(agentmail_signature "$AGENTMAIL_WEBHOOK_SECRET" "$msg_id" "$timestamp" "$payload")"
+  call_raw POST /webhooks/agentmail "$payload" \
+    "Content-Type: application/json" \
+    "svix-id: ${msg_id}" \
+    "svix-timestamp: ${timestamp}" \
+    "svix-signature: ${signature}"
+}
+
+wait_for_message_fetch() {
+  local agent_id="$1"
+  local auth="$2"
+  local message_id="$3"
+  local label="$4"
+  local max_attempts="${5:-6}"
+  local delay_seconds="${6:-1}"
+  local attempt=1
+
+  while [[ "$attempt" -le "$max_attempts" ]]; do
+    call GET "/agents/${agent_id}/messages/${message_id}" "$auth"
+    if [[ "$HTTP_STATUS" == "200" ]]; then
+      pass "HTTP 200 - $label"
+      return 0
+    fi
+
+    if [[ "$attempt" -eq "$max_attempts" ]]; then
+      fail "HTTP $HTTP_STATUS (expected 200) - $label"
+      local message
+      message="$(jq_r "$HTTP_BODY" '.message // empty')"
+      if [[ -n "$message" ]]; then
+        info "message: $message"
+      fi
+      return 1
+    fi
+
+    info "Message ${message_id} not visible yet (HTTP $HTTP_STATUS); retrying..."
+    sleep "$delay_seconds"
+    attempt=$((attempt + 1))
+  done
+}
+
 echo ""
 echo -e "${BOLD}${BLUE}"
 cat <<'BANNER'
@@ -263,6 +449,13 @@ echo -e "${NC}"
 echo -e "  Target: ${CYAN}${BASE_URL}${NC}"
 echo -e "  Run:    ${RUN_TAG}"
 echo ""
+
+configure_interactive_mode
+configure_state_persistence
+
+if [[ "$PERSIST_STATE" != "true" ]]; then
+  clear_state_file
+fi
 
 for dep in curl jq; do
   if command -v "$dep" >/dev/null 2>&1; then
@@ -280,6 +473,26 @@ if [[ -n "${STRIPE_WEBHOOK_SECRET:-}" ]]; then
   fi
 fi
 
+if [[ -n "${AGENTMAIL_WEBHOOK_SECRET:-}" ]]; then
+  if command -v node >/dev/null 2>&1; then
+    echo -e "  ${GREEN}[OK]${NC} node"
+  else
+    warn "node not found - signed AgentMail webhook simulation will be skipped"
+  fi
+fi
+
+if [[ "$INTERACTIVE_MODE" == "true" ]]; then
+  echo ""
+  info "Interactive demo mode is on"
+  info "Use Enter to advance one beat at a time, 'a' to autoplay, or 'q' to stop"
+fi
+
+if [[ "$PERSIST_STATE" == "true" ]]; then
+  info "Demo state persistence is on"
+else
+  info "Demo state persistence is off; saved state will be cleared"
+fi
+
 step "Health check"
 call GET /health
 if [[ "$HTTP_STATUS" != "200" ]]; then
@@ -290,7 +503,7 @@ pass "Server is up"
 reset_state
 STATE_LOADED=false
 
-if [[ -f "$STATE_FILE" ]]; then
+if [[ "$PERSIST_STATE" == "true" && -f "$STATE_FILE" ]]; then
   # shellcheck source=/dev/null
   source "$STATE_FILE"
 
@@ -317,6 +530,7 @@ if [[ -f "$STATE_FILE" ]]; then
 fi
 
 section "1. Control Plane Bootstrap"
+pause_for_next "Bootstrap the org and API keys."
 
 if [[ -z "$ORG_ID" ]]; then
   step "Create demo org"
@@ -356,6 +570,7 @@ call POST "/orgs/${ORG_ID}/api-keys" "$SERVICE_KEY"
 assert_http "Service key blocked from admin key creation" 403
 
 section "2. Agent Identity and Email Rail"
+pause_for_next "Create the two agents and provision AgentMail inboxes."
 
 if [[ -z "$AGENT_CONCIERGE" ]]; then
   step "Create hero agent: concierge-agent"
@@ -479,28 +694,211 @@ else
   fail "Expected an active email resource for concierge"
 fi
 
-EMAIL_SUBJECT="Phase D live email ${RUN_TAG}"
+EMAIL_SUBJECT="Beta onboarding thread ${RUN_TAG}"
+EMAIL_TEXT="Hi ops — this AgentConnect demo agent has its own inbox. Please confirm the beta workflow so we can show send, read, reply, and timeline visibility in one thread."
+EMAIL_MESSAGE_ID=""
+EMAIL_MESSAGE_FETCHED=false
+EMAIL_REPLY_RAN=false
+EMAIL_RECEIVED_WEBHOOK_RECORDED=false
+EMAIL_THREAD_EVENT_TARGET=1
 
-step "Send a live email from concierge-agent to ops-approver"
+pause_for_next "Send a real beta workflow email from the agent inbox."
+step "Send a live beta workflow email from concierge-agent to ops-approver"
 EMAIL_REQUEST="$(jq -nc \
   --arg to "$APPROVER_EMAIL" \
   --arg subject "$EMAIL_SUBJECT" \
-  --arg text "This is the live multi-rail demo path." \
+  --arg text "$EMAIL_TEXT" \
   '{"to":[$to],"subject":$subject,"text":$text}')"
 call POST "/agents/${AGENT_CONCIERGE}/actions/send_email" "$ROOT_KEY" "$EMAIL_REQUEST"
 assert_http "Send email" 200
 
 EMAIL_EVENT_ID="$(jq_r "$HTTP_BODY" '.event.id')"
+EMAIL_MESSAGE_ID="$(jq_r "$HTTP_BODY" '.event.data.message_id // null')"
 EMAIL_EVENT_TYPE="$(jq_r "$HTTP_BODY" '.event.eventType')"
 EMAIL_THREAD_ID="$(jq_r "$HTTP_BODY" '.event.data.thread_id // null')"
+require_var "email_message_id" "$EMAIL_MESSAGE_ID"
 if [[ "$EMAIL_EVENT_TYPE" == "email.sent" ]]; then
   pass "Canonical email event written as email.sent"
 else
   fail "Expected email.sent, got $EMAIL_EVENT_TYPE"
 fi
 info "email_event_id: $EMAIL_EVENT_ID"
+info "message_id:     $EMAIL_MESSAGE_ID"
 info "thread_id:      $EMAIL_THREAD_ID"
 
+pause_for_next "Load the exact provider message so you can show what the agent sent."
+step "Fetch the sent message from AgentMail"
+if wait_for_message_fetch "$AGENT_CONCIERGE" "$ROOT_KEY" "$EMAIL_MESSAGE_ID" "Fetch sent message"; then
+  EMAIL_MESSAGE_FETCHED=true
+  FETCHED_SUBJECT="$(jq_r "$HTTP_BODY" '.subject // null')"
+  FETCHED_FROM="$(jq_r "$HTTP_BODY" '.from // null')"
+  FETCHED_TO="$(echo "$HTTP_BODY" | jq -r '.to[0] // null')"
+  FETCHED_PREVIEW="$(jq_r "$HTTP_BODY" '.preview // .text // empty')"
+
+  if [[ "$FETCHED_SUBJECT" == "$EMAIL_SUBJECT" ]]; then
+    pass "Fetched message subject matches the send request"
+  else
+    fail "Expected fetched subject '$EMAIL_SUBJECT', got '$FETCHED_SUBJECT'"
+  fi
+
+  if [[ "$FETCHED_FROM" == "$CONCIERGE_EMAIL" ]]; then
+    pass "Fetched message is anchored to the agent inbox"
+  else
+    fail "Expected fetched message from '$CONCIERGE_EMAIL', got '$FETCHED_FROM'"
+  fi
+
+  if [[ "$FETCHED_TO" == "$APPROVER_EMAIL" ]]; then
+    pass "Fetched message shows the intended recipient"
+  else
+    fail "Expected fetched message to '$APPROVER_EMAIL', got '$FETCHED_TO'"
+  fi
+
+  info "message preview: ${FETCHED_PREVIEW}"
+else
+  warn "Skipping reply step because the sent message could not be loaded from AgentMail"
+fi
+
+if [[ "$EMAIL_MESSAGE_FETCHED" == "true" ]]; then
+  EMAIL_REPLY_TEXT="Following up in the same thread so a customer can see thread continuity, safe replies, and a complete audit trail."
+
+  pause_for_next "Reply in the same thread using the original message id."
+  step "Reply to the same conversation from concierge-agent"
+  EMAIL_REPLY_REQUEST="$(jq -nc \
+    --arg message_id "$EMAIL_MESSAGE_ID" \
+    --arg text "$EMAIL_REPLY_TEXT" \
+    '{"message_id":$message_id,"text":$text}')"
+  call POST "/agents/${AGENT_CONCIERGE}/actions/reply_email" "$ROOT_KEY" "$EMAIL_REPLY_REQUEST"
+  assert_http "Reply in thread" 200
+
+  if [[ "$HTTP_STATUS" == "200" ]]; then
+    EMAIL_REPLY_RAN=true
+    EMAIL_THREAD_EVENT_TARGET=2
+    REPLY_EVENT_ID="$(jq_r "$HTTP_BODY" '.event.id')"
+    REPLY_MESSAGE_ID="$(jq_r "$HTTP_BODY" '.event.data.message_id // null')"
+    REPLY_EVENT_TYPE="$(jq_r "$HTTP_BODY" '.event.eventType')"
+    REPLY_IN_REPLY_TO="$(jq_r "$HTTP_BODY" '.event.data.in_reply_to_message_id // null')"
+    REPLY_THREAD_ID="$(jq_r "$HTTP_BODY" '.event.data.thread_id // null')"
+
+    if [[ "$REPLY_EVENT_TYPE" == "email.sent" ]]; then
+      pass "Reply produced a second canonical email.sent event"
+    else
+      fail "Expected reply event type email.sent, got $REPLY_EVENT_TYPE"
+    fi
+
+    if [[ "$REPLY_IN_REPLY_TO" == "$EMAIL_MESSAGE_ID" ]]; then
+      pass "Reply event preserves the original message id for traceability"
+    else
+      fail "Expected in_reply_to_message_id '$EMAIL_MESSAGE_ID', got '$REPLY_IN_REPLY_TO'"
+    fi
+
+    if [[ "$EMAIL_THREAD_ID" != "null" && "$REPLY_THREAD_ID" == "$EMAIL_THREAD_ID" ]]; then
+      pass "Reply stayed on the same AgentMail thread"
+    elif [[ "$EMAIL_THREAD_ID" == "null" ]]; then
+      skip "Initial send did not expose a thread_id, so reply thread continuity was not asserted"
+    else
+      fail "Expected reply thread '$EMAIL_THREAD_ID', got '$REPLY_THREAD_ID'"
+    fi
+
+    info "reply_event_id: $REPLY_EVENT_ID"
+    info "reply_msg_id:   $REPLY_MESSAGE_ID"
+  fi
+fi
+
+EMAIL_THREAD_FOR_WEBHOOK="$EMAIL_THREAD_ID"
+if [[ -n "${REPLY_THREAD_ID:-}" && "${REPLY_THREAD_ID:-null}" != "null" ]]; then
+  EMAIL_THREAD_FOR_WEBHOOK="$REPLY_THREAD_ID"
+fi
+
+if [[ -n "${AGENTMAIL_WEBHOOK_SECRET:-}" && "$EMAIL_THREAD_FOR_WEBHOOK" != "null" ]]; then
+  if command -v node >/dev/null 2>&1; then
+    CUSTOMER_EMAIL="beta-customer+${RUN_TAG}@example.com"
+    RECEIVED_EVENT_ID="evt_demo_received_${RUN_TAG}"
+    RECEIVED_MESSAGE_ID="msg_demo_received_${RUN_TAG}"
+    RECEIVED_SUBJECT="Re: ${EMAIL_SUBJECT}"
+    RECEIVED_PREVIEW="Looks great. Please keep me posted on the beta timeline."
+    RECEIVED_TIMESTAMP="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    AGENTMAIL_RECEIVED_PAYLOAD="$(jq -nc \
+      --arg event_id "$RECEIVED_EVENT_ID" \
+      --arg inbox_id "$CONCIERGE_EMAIL" \
+      --arg message_id "$RECEIVED_MESSAGE_ID" \
+      --arg thread_id "$EMAIL_THREAD_FOR_WEBHOOK" \
+      --arg from "$CUSTOMER_EMAIL" \
+      --arg subject "$RECEIVED_SUBJECT" \
+      --arg preview "$RECEIVED_PREVIEW" \
+      --arg ts "$RECEIVED_TIMESTAMP" \
+      '{
+        type:"event",
+        event_type:"message.received",
+        event_id:$event_id,
+        message:{
+          inbox_id:$inbox_id,
+          message_id:$message_id,
+          thread_id:$thread_id,
+          labels:["unread"],
+          from:$from,
+          reply_to:[$from],
+          to:[$inbox_id],
+          subject:$subject,
+          preview:$preview,
+          size:1024,
+          updated_at:$ts,
+          created_at:$ts,
+          timestamp:$ts
+        },
+        thread:{
+          inbox_id:$inbox_id,
+          thread_id:$thread_id,
+          labels:["unread"],
+          timestamp:$ts,
+          senders:[$from],
+          recipients:[$inbox_id],
+          subject:$subject,
+          preview:$preview,
+          last_message_id:$message_id,
+          message_count:3,
+          size:2048,
+          updated_at:$ts,
+          created_at:$ts
+        }
+      }')"
+
+    pause_for_next "Simulate a customer reply arriving through the official AgentMail webhook."
+    step "Simulate an inbound customer email webhook"
+    post_agentmail_webhook "$AGENTMAIL_RECEIVED_PAYLOAD" "msg_demo_received_${RUN_TAG}"
+    if [[ "$HTTP_STATUS" == "200" ]]; then
+      pass "Signed AgentMail received webhook accepted"
+      EMAIL_RECEIVED_WEBHOOK_RECORDED=true
+      if [[ "$EMAIL_REPLY_RAN" == "true" ]]; then
+        EMAIL_THREAD_EVENT_TARGET=3
+      else
+        EMAIL_THREAD_EVENT_TARGET=2
+      fi
+
+      call GET "/agents/${AGENT_CONCIERGE}/events?type=email.received" "$ROOT_KEY"
+      assert_http "Query email.received events" 200
+      RECEIVED_MATCHED="$(echo "$HTTP_BODY" | jq -r --arg mid "$RECEIVED_MESSAGE_ID" '[.events[].data.message_id == $mid] | any')"
+      if [[ "$RECEIVED_MATCHED" == "true" ]]; then
+        pass "Inbound webhook became a canonical email.received event"
+      else
+        fail "Could not find email.received for $RECEIVED_MESSAGE_ID"
+      fi
+    elif [[ "$HTTP_STATUS" == "401" ]]; then
+      skip "AgentMail webhook signature failed; local AGENTMAIL_WEBHOOK_SECRET does not match the server"
+    else
+      fail "HTTP $HTTP_STATUS (expected 200) - AgentMail received webhook accepted"
+      AGENTMAIL_WEBHOOK_MESSAGE="$(jq_r "$HTTP_BODY" '.message // empty')"
+      [[ -n "$AGENTMAIL_WEBHOOK_MESSAGE" ]] && info "message: $AGENTMAIL_WEBHOOK_MESSAGE"
+    fi
+  else
+    skip "node is unavailable; signed AgentMail webhook simulation skipped"
+  fi
+elif [[ -z "${AGENTMAIL_WEBHOOK_SECRET:-}" ]]; then
+  skip "AGENTMAIL_WEBHOOK_SECRET is not exported in this shell; inbound webhook simulation skipped"
+else
+  skip "No AgentMail thread_id was available, so inbound webhook thread replay was skipped"
+fi
+
+pause_for_next "Show the guardrail that blocks a risky email before it leaves the system."
 step "Policy blocks a send before any provider call escapes"
 call POST "/agents/${AGENT_CONCIERGE}/actions/send_email" "$ROOT_KEY" \
   '{"to":["pilot@competitor.com"],"subject":"Blocked","text":"This should be denied."}'
@@ -521,6 +919,7 @@ TRANSACTION_ID=""
 if is_truthy "${DEMO_SKIP_CARD:-0}"; then
   skip "DEMO_SKIP_CARD requested; card issuance and card-backed timeline checks are disabled"
 else
+  pause_for_next "Attach the card rail to the same agent identity."
   step "Generic resource creation is intentionally rejected for Stripe cards"
   call POST "/agents/${AGENT_CONCIERGE}/resources" "$ROOT_KEY" \
     '{"type":"card","provider":"stripe","config":{}}'
@@ -633,6 +1032,7 @@ if [[ "$CARD_DEMO_RAN" == "true" ]]; then
   elif ! command -v openssl >/dev/null 2>&1; then
     skip "openssl is unavailable; signed Stripe webhook simulation skipped"
   else
+    pause_for_next "Replay signed Stripe webhooks and turn them into canonical card activity."
     ID_STAMP="$(date +%s)$$"
     AUTHORIZATION_ID="iauth_demo_${ID_STAMP}"
     TRANSACTION_ID="ipi_demo_${ID_STAMP}"
@@ -698,6 +1098,7 @@ if [[ "$CARD_DEMO_RAN" == "true" ]]; then
 fi
 
 section "5. Canonical Event Log and Unified Timeline"
+pause_for_next "Read the event log and unified timeline for the same agent."
 
 step "Full event log for the hero agent"
 call GET "/agents/${AGENT_CONCIERGE}/events" "$ROOT_KEY"
@@ -755,9 +1156,29 @@ else
 fi
 info "timeline kinds: ${TIMELINE_KINDS}"
 
-EMAIL_TIMELINE_PRESENT="$(echo "$HTTP_BODY" | jq -r '[.items[].kind == "email_thread"] | any')"
+if [[ -n "${EMAIL_THREAD_FOR_WEBHOOK:-}" && "${EMAIL_THREAD_FOR_WEBHOOK:-null}" != "null" ]]; then
+  EMAIL_TIMELINE_ITEM="$(echo "$HTTP_BODY" | jq -c --arg tid "$EMAIL_THREAD_FOR_WEBHOOK" '[.items[] | select(.kind == "email_thread" and .summary.threadId == $tid)][0]')"
+else
+  EMAIL_TIMELINE_ITEM="$(echo "$HTTP_BODY" | jq -c '[.items[] | select(.kind == "email_thread")][0]')"
+fi
+EMAIL_TIMELINE_PRESENT="$(echo "$EMAIL_TIMELINE_ITEM" | jq -r 'if . == null then "false" else "true" end')"
 if [[ "$EMAIL_TIMELINE_PRESENT" == "true" ]]; then
   pass "Timeline includes an email_thread item"
+  EMAIL_TIMELINE_EVENT_COUNT="$(echo "$EMAIL_TIMELINE_ITEM" | jq -r '.eventCount // 0')"
+  if [[ "$EMAIL_TIMELINE_EVENT_COUNT" -ge "$EMAIL_THREAD_EVENT_TARGET" ]]; then
+    pass "Email timeline groups the thread into ${EMAIL_TIMELINE_EVENT_COUNT} event(s)"
+  else
+    fail "Expected at least $EMAIL_THREAD_EVENT_TARGET grouped email event(s), got $EMAIL_TIMELINE_EVENT_COUNT"
+  fi
+
+  if [[ "$EMAIL_RECEIVED_WEBHOOK_RECORDED" == "true" ]]; then
+    EMAIL_TIMELINE_LATEST_TYPE="$(echo "$EMAIL_TIMELINE_ITEM" | jq -r '.latestEventType // null')"
+    if [[ "$EMAIL_TIMELINE_LATEST_TYPE" == "email.received" ]]; then
+      pass "Timeline shows the inbound customer reply as the latest email event"
+    else
+      fail "Expected latest email timeline event to be email.received, got $EMAIL_TIMELINE_LATEST_TYPE"
+    fi
+  fi
 else
   fail "Expected an email_thread item on the timeline"
 fi
@@ -803,6 +1224,7 @@ else
 fi
 
 section "6. Multi-Tenant Isolation"
+pause_for_next "Show that a second org cannot see the demo agent or timeline."
 
 step "Create a second org to test org boundaries"
 call POST /orgs "" '{"name":"Shadow Org"}'
@@ -818,18 +1240,35 @@ step "Cross-org timeline reads are also blocked"
 call GET "/agents/${AGENT_CONCIERGE}/timeline" "$ATTACKER_KEY"
 assert_http "Other org cannot read hero timeline" 404
 
-if [[ "$CARD_DEMO_RAN" == "true" && -n "$CARD_RESOURCE_ID" ]]; then
-  section "7. Cleanup"
+section "7. Cleanup"
+pause_for_next "Delete provisioned resources and clear saved demo state."
 
+if [[ -n "$CARD_RESOURCE_ID" ]]; then
   step "Delete the demo card so reruns stay tidy"
-  call DELETE "/agents/${AGENT_CONCIERGE}/resources/${CARD_RESOURCE_ID}" "$ROOT_KEY"
-  assert_http "Delete card resource" 200
-  if [[ "$(jq_r "$HTTP_BODY" '.resource.state')" == "deleted" ]]; then
-    pass "Card resource marked deleted"
-  else
-    fail "Expected deleted card resource state"
-  fi
+  delete_resource_if_present "$AGENT_CONCIERGE" "$CARD_RESOURCE_ID" "$ROOT_KEY" "Card resource"
 fi
+
+if [[ -n "$CONCIERGE_EMAIL_RESOURCE_ID" ]]; then
+  step "Delete the concierge inbox"
+  delete_resource_if_present \
+    "$AGENT_CONCIERGE" \
+    "$CONCIERGE_EMAIL_RESOURCE_ID" \
+    "$ROOT_KEY" \
+    "Concierge inbox"
+fi
+
+if [[ -n "$APPROVER_EMAIL_RESOURCE_ID" ]]; then
+  step "Delete the approver inbox"
+  delete_resource_if_present \
+    "$AGENT_APPROVER" \
+    "$APPROVER_EMAIL_RESOURCE_ID" \
+    "$ROOT_KEY" \
+    "Approver inbox"
+fi
+
+step "Clear saved demo state"
+clear_state_file
+pass "Saved demo state cleared"
 
 TOTAL_CHECKS=$((PASS_COUNT + FAIL_COUNT + SKIP_COUNT))
 

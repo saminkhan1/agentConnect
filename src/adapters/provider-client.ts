@@ -37,7 +37,7 @@ function getRetryDelayMs(attempt: number): number {
   return exponentialDelay + jitter;
 }
 
-async function sleep(ms: number): Promise<void> {
+export async function sleep(ms: number): Promise<void> {
   await new Promise<void>((resolve) => {
     setTimeout(resolve, ms);
   });
@@ -48,23 +48,28 @@ export async function withTimeout<T>(
   timeoutMs: number,
 ): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => {
-    controller.abort();
-  }, timeoutMs);
+  const timeoutError = new AppError(
+    'ADAPTER_TIMEOUT',
+    504,
+    `Operation timed out after ${String(timeoutMs)}ms`,
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(timeoutError);
+      controller.abort();
+    }, timeoutMs);
+  });
+
+  const inFlight = fn(controller.signal);
 
   try {
-    return await fn(controller.signal);
-  } catch (error) {
-    if (controller.signal.aborted) {
-      throw new AppError(
-        'ADAPTER_TIMEOUT',
-        504,
-        `Operation timed out after ${String(timeoutMs)}ms`,
-      );
-    }
-    throw error;
+    return await Promise.race([inFlight, timeoutPromise]);
   } finally {
-    clearTimeout(timer);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
   }
 }
 
@@ -84,49 +89,4 @@ export async function withRetry<T>(fn: () => Promise<T>, opts: RetryOptions = {}
   }
 
   throw new AppError('ADAPTER_RETRY_EXHAUSTED', 502, 'Retry attempts exhausted');
-}
-
-type CircuitBreakerState = 'closed' | 'open' | 'half-open';
-
-export class CircuitBreaker {
-  private state: CircuitBreakerState = 'closed';
-  private failureCount = 0;
-  private lastFailureTime = 0;
-
-  constructor(
-    private readonly failureThreshold = 5,
-    private readonly recoveryTimeMs = 30_000,
-  ) {}
-
-  async execute<T>(fn: () => Promise<T>): Promise<T> {
-    if (this.state === 'open') {
-      const elapsed = Date.now() - this.lastFailureTime;
-      if (elapsed < this.recoveryTimeMs) {
-        throw new AppError('ADAPTER_CIRCUIT_OPEN', 503, 'Circuit breaker is open');
-      }
-      this.state = 'half-open';
-    }
-
-    try {
-      const result = await fn();
-      this.onSuccess();
-      return result;
-    } catch (error) {
-      this.onFailure();
-      throw error;
-    }
-  }
-
-  private onSuccess(): void {
-    this.failureCount = 0;
-    this.state = 'closed';
-  }
-
-  private onFailure(): void {
-    this.failureCount += 1;
-    this.lastFailureTime = Date.now();
-    if (this.failureCount >= this.failureThreshold) {
-      this.state = 'open';
-    }
-  }
 }

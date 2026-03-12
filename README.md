@@ -83,16 +83,32 @@ AgentConnect aims to be the neutral, multi-rail **"agent infrastructure"** layer
    ```
 
 6. **Start the development server:**
+
    ```bash
    source .env && pnpm run dev   # Start server — MUST source .env first; missing vars silently disable AgentMail adapter
    ```
+
    The API will be available at `http://localhost:3000`.
+
+7. **Expose local webhook routes over Cloudflare Tunnel (optional):**
+   ```bash
+   pnpm run dev:webhooks
+   ```
+   This runs the free TryCloudflare flow for your current local `PORT` and prints a random public `trycloudflare.com` URL. See `docs/cloudflare-tunnel.md` for the full dev workflow.
 
 ### Testing & Linting
 
 - **Run all verification checks (Lint + Types + Test - full pre-merge check):**
   ```bash
   pnpm run verify
+  ```
+- **Run lint only:**
+  ```bash
+  pnpm run lint
+  ```
+- **Run typecheck only:**
+  ```bash
+  pnpm run typecheck
   ```
 - **Run Unit Tests:**
   ```bash
@@ -104,7 +120,7 @@ AgentConnect aims to be the neutral, multi-rail **"agent infrastructure"** layer
   ```
 - **Auto-fix linting issues:**
   ```bash
-  pnpm run fix              # eslint --fix + prettier --write
+  pnpm run fix              # lint:fix + format
   ```
 
 ---

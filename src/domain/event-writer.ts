@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { db } from '../db';
 import { events } from '../db/schema';
 import { eventTypeSchema, type EventType, validateEventData } from './events';
+import { sleep } from '../adapters/provider-client';
 
 type EventRecord = typeof events.$inferSelect;
 type DatabaseClient = typeof db;
@@ -168,12 +169,6 @@ function getRetryDelayMs(attempt: number): number {
   const exponentialDelay = BASE_RETRY_DELAY_MS * 2 ** (attempt - 1);
   const jitter = Math.floor(Math.random() * BASE_RETRY_DELAY_MS);
   return exponentialDelay + jitter;
-}
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }
 
 export class EventWriter {

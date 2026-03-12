@@ -1,7 +1,7 @@
 import type { FastifyPluginCallback } from 'fastify';
 import fp from 'fastify-plugin';
 
-import { closeDbPool, ensureDbIsReady } from '../db';
+import { closeDbPool, ensureDbIsReady, withAdvisoryLock } from '../db';
 import { DalFactory, systemDal } from '../db/dal';
 
 let activeServerCount = 0;
@@ -9,6 +9,7 @@ let activeServerCount = 0;
 declare module 'fastify' {
   interface FastifyInstance {
     systemDal: typeof systemDal;
+    withAdvisoryLock<T>(lockKey: string, callback: () => Promise<T>): Promise<T>;
   }
 
   interface FastifyRequest {
@@ -22,6 +23,7 @@ const dbPlugin: FastifyPluginCallback = (server, _opts, done) => {
 
   // Keep write/read access to org-scoped data behind DAL instances.
   server.decorate('systemDal', systemDal);
+  server.decorate('withAdvisoryLock', withAdvisoryLock);
 
   // Provide a helper on the request to instantiate an org-scoped DAL
   server.decorateRequest('dalFactory', function dalFactory(orgId: string) {

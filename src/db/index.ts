@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { drizzle } from 'drizzle-orm/node-postgres';
-import { Pool } from 'pg';
+import { Pool, type PoolClient } from 'pg';
 
 import { resolveDatabaseUrl } from '../config';
 import * as schema from './schema';
@@ -39,4 +39,28 @@ export async function closeDbPool() {
 
   await pool.end();
   isPoolClosed = true;
+}
+
+async function acquireAdvisoryLock(client: PoolClient, lockKey: string) {
+  await client.query('select pg_advisory_lock(hashtextextended($1, 0))', [lockKey]);
+}
+
+async function releaseAdvisoryLock(client: PoolClient, lockKey: string) {
+  await client.query('select pg_advisory_unlock(hashtextextended($1, 0))', [lockKey]);
+}
+
+export async function withAdvisoryLock<T>(lockKey: string, callback: () => Promise<T>): Promise<T> {
+  ensureDbIsReady();
+
+  const client = await pool.connect();
+  try {
+    await acquireAdvisoryLock(client, lockKey);
+    try {
+      return await callback();
+    } finally {
+      await releaseAdvisoryLock(client, lockKey).catch(() => {});
+    }
+  } finally {
+    client.release();
+  }
 }

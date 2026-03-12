@@ -24,6 +24,7 @@ export class WebhookProcessor {
     await Promise.all(
       eventsWithRef.flatMap((evt) => {
         const resource = byRef.get(evt.resourceRef);
+        // Providers can emit delayed lifecycle events after a resource has already been deleted.
         if (!resource) return [];
         return [
           this.eventWriter.writeEvent({

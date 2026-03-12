@@ -15,6 +15,20 @@
       "when": 1773004292219,
       "tag": "0001_empty_northstar",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1773178800522,
+      "tag": "0002_futuristic_nitro",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1773206709632,
+      "tag": "0003_flawless_steve_rogers",
+      "breakpoints": true
     }
   ]
 }

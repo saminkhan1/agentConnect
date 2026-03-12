@@ -1,11 +1,16 @@
-import eslint from '@eslint/js';
+import neostandard, { resolveIgnoresFromGitignore } from 'neostandard';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  eslint.configs.recommended,
+  ...neostandard({
+    ts: true,
+    noStyle: true,
+    ignores: resolveIgnoresFromGitignore(),
+  }),
   ...tseslint.configs.recommendedTypeChecked,
   ...tseslint.configs.strictTypeChecked,
   {
+    files: ['**/*.ts', '**/*.mts', '**/*.cts'],
     languageOptions: {
       parserOptions: {
         project: true,
@@ -13,10 +18,12 @@ export default tseslint.config(
       },
     },
     rules: {
+      camelcase: 'off',
+      'no-void': ['error', { allowAsStatement: true }],
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
     },
   },
   {
-    ignores: ['dist/', 'node_modules/', 'eslint.config.mjs', 'scripts/setup-git-hooks.cjs'],
+    ignores: ['eslint.config.mjs', 'scripts/setup-git-hooks.cjs'],
   },
 );

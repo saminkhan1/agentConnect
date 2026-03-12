@@ -7,6 +7,19 @@ const nodeEnvSchema = z.enum(['development', 'test', 'production']);
 
 const hostSchema = z.string().trim().min(1);
 const logLevelSchema = z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']);
+const booleanFlagSchema = z.preprocess((value) => {
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+      return true;
+    }
+    if (normalized.length === 0 || ['0', 'false', 'no', 'off'].includes(normalized)) {
+      return false;
+    }
+  }
+
+  return value;
+}, z.boolean());
 
 const serverEnvSchema = z.object({
   NODE_ENV: nodeEnvSchema.optional().default('development'),
@@ -17,6 +30,9 @@ const serverEnvSchema = z.object({
   AGENTMAIL_WEBHOOK_SECRET: z.string().trim().min(1).optional(),
   STRIPE_SECRET_KEY: z.string().trim().min(1).optional(),
   STRIPE_WEBHOOK_SECRET: z.string().trim().min(1).optional(),
+  AGENTINFRA_API_KEY: z.string().trim().min(1).optional(),
+  MCP_HTTP_ENABLED: booleanFlagSchema.optional().default(false),
+  MCP_ALLOWED_ORIGINS: z.string().trim().optional(),
 });
 
 const dbEnvSchema = z.object({

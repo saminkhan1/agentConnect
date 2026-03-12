@@ -24,6 +24,15 @@ export const resourceStateEnum = pgEnum('resource_state', [
   'suspended',
   'deleted',
 ]);
+export const outboundActionTypeEnum = pgEnum('outbound_action_type', ['send_email', 'reply_email']);
+export const outboundActionStateEnum = pgEnum('outbound_action_state', [
+  'ready',
+  'dispatching',
+  'rejected',
+  'provider_succeeded',
+  'completed',
+  'ambiguous',
+]);
 
 export const orgs = pgTable('orgs', {
   id: varchar('id', { length: 255 }).primaryKey(),
@@ -124,5 +133,43 @@ export const events = pgTable(
       table.eventType,
       desc(table.occurredAt),
     ),
+  ],
+);
+
+export const outboundActions = pgTable(
+  'outbound_actions',
+  {
+    id: uuid('id').primaryKey(),
+    orgId: varchar('org_id', { length: 255 })
+      .references(() => orgs.id)
+      .notNull(),
+    agentId: varchar('agent_id', { length: 255 }).notNull(),
+    resourceId: varchar('resource_id', { length: 255 }).notNull(),
+    provider: text('provider').notNull(),
+    action: outboundActionTypeEnum('action').notNull(),
+    idempotencyKey: text('idempotency_key').notNull(),
+    requestHash: text('request_hash').notNull(),
+    requestData: jsonb('request_data').$type<Record<string, unknown>>().notNull().default({}),
+    providerResult: jsonb('provider_result').$type<Record<string, unknown>>(),
+    eventId: uuid('event_id'),
+    lastError: jsonb('last_error').$type<Record<string, unknown>>(),
+    state: outboundActionStateEnum('state').notNull().default('ready'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.orgId, table.agentId],
+      foreignColumns: [agents.orgId, agents.id],
+      name: 'outbound_actions_org_id_agent_id_agents_org_id_id_fk',
+    }),
+    uniqueIndex('outbound_actions_org_action_idempotency_key_unique').on(
+      table.orgId,
+      table.action,
+      table.idempotencyKey,
+    ),
+    index('outbound_actions_org_idempotency_key_idx').on(table.orgId, table.idempotencyKey),
+    index('outbound_actions_org_agent_idx').on(table.orgId, table.agentId),
+    index('outbound_actions_org_state_idx').on(table.orgId, table.state),
   ],
 );

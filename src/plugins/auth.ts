@@ -2,6 +2,7 @@ import type { FastifyPluginCallback, FastifyReply, FastifyRequest } from 'fastif
 import fp from 'fastify-plugin';
 
 import {
+  ApiKeyType,
   ApiScope,
   getScopesForApiKeyType,
   parseApiKeyFromAuthorizationHeader,
@@ -11,7 +12,20 @@ import {
 export type AuthContext = {
   org_id: string;
   key_id: string;
+  key_type: ApiKeyType;
   scopes: ApiScope[];
+};
+
+type AuthApiKeyRecord = {
+  id: string;
+  orgId: string;
+  keyType: ApiKeyType;
+  keyHash: string;
+  isRevoked: boolean;
+};
+
+type AuthApiKeyLookup = {
+  getApiKeyById(id: string): Promise<AuthApiKeyRecord | null>;
 };
 
 declare module 'fastify' {
@@ -24,6 +38,33 @@ function sendUnauthorized(reply: FastifyReply) {
   return reply.code(401).send({ message: 'Unauthorized' });
 }
 
+export async function resolveAuthContext(
+  apiKeys: AuthApiKeyLookup,
+  authorizationHeader: string,
+): Promise<AuthContext | null> {
+  const parsedApiKey = parseApiKeyFromAuthorizationHeader(authorizationHeader);
+  if (!parsedApiKey) {
+    return null;
+  }
+
+  const apiKey = await apiKeys.getApiKeyById(parsedApiKey.keyId);
+  if (!apiKey || apiKey.isRevoked) {
+    return null;
+  }
+
+  const isValidSecret = await verifyApiKeySecret(parsedApiKey.secret, apiKey.keyHash);
+  if (!isValidSecret) {
+    return null;
+  }
+
+  return {
+    org_id: apiKey.orgId,
+    key_id: apiKey.id,
+    key_type: apiKey.keyType,
+    scopes: getScopesForApiKeyType(apiKey.keyType),
+  };
+}
+
 export function requireScope(...requiredScopes: ApiScope[]) {
   return async (request: FastifyRequest, reply: FastifyReply) => {
     const auth = request.auth;
@@ -34,6 +75,19 @@ export function requireScope(...requiredScopes: ApiScope[]) {
     const grantedScopes = new Set(auth.scopes);
     const hasRequiredScopes = requiredScopes.every((scope) => grantedScopes.has(scope));
     if (!hasRequiredScopes) {
+      return reply.code(403).send({ message: 'Forbidden' });
+    }
+  };
+}
+
+export function requireKeyType(...requiredKeyTypes: ApiKeyType[]) {
+  return async (request: FastifyRequest, reply: FastifyReply) => {
+    const auth = request.auth;
+    if (!auth) {
+      return reply.code(401).send({ message: 'Unauthorized' });
+    }
+
+    if (!requiredKeyTypes.includes(auth.key_type)) {
       return reply.code(403).send({ message: 'Forbidden' });
     }
   };
@@ -54,30 +108,12 @@ const authPlugin: FastifyPluginCallback = (server, _opts, done) => {
       return sendUnauthorized(reply);
     }
 
-    const parsedApiKey = parseApiKeyFromAuthorizationHeader(authorizationHeader);
-    if (!parsedApiKey) {
+    const auth = await resolveAuthContext(server.systemDal, authorizationHeader);
+    if (!auth) {
       return sendUnauthorized(reply);
     }
 
-    const apiKey = await server.systemDal.getApiKeyById(parsedApiKey.keyId);
-    if (!apiKey) {
-      return sendUnauthorized(reply);
-    }
-
-    if (apiKey.isRevoked) {
-      return sendUnauthorized(reply);
-    }
-
-    const isValidSecret = await verifyApiKeySecret(parsedApiKey.secret, apiKey.keyHash);
-    if (!isValidSecret) {
-      return sendUnauthorized(reply);
-    }
-
-    request.auth = {
-      org_id: apiKey.orgId,
-      key_id: apiKey.id,
-      scopes: getScopesForApiKeyType(apiKey.keyType),
-    };
+    request.auth = auth;
   });
 
   done();

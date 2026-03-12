@@ -1,8 +1,9 @@
 import { and, desc, eq, gte, InferInsertModel, lt, lte, ne, or, sql } from 'drizzle-orm';
 
 import { db } from './index';
-import { agents, apiKeys, events, orgs, resources } from './schema';
+import { agents, apiKeys, events, orgs, outboundActions, resources } from './schema';
 import type { EventType } from '../domain/events';
+import type { OutboundActionState, OutboundActionType } from '../domain/outbound-actions';
 import {
   buildTimelineItem,
   type TimelineCursor,
@@ -14,11 +15,13 @@ type NewAgent = InferInsertModel<typeof agents>;
 type NewApiKey = InferInsertModel<typeof apiKeys>;
 type NewEvent = InferInsertModel<typeof events>;
 type NewOrg = InferInsertModel<typeof orgs>;
+type NewOutboundAction = InferInsertModel<typeof outboundActions>;
 type NewResource = InferInsertModel<typeof resources>;
 type AgentRecord = typeof agents.$inferSelect;
 type OrgRecord = typeof orgs.$inferSelect;
 type ApiKeyRecord = typeof apiKeys.$inferSelect;
 type EventRecord = typeof events.$inferSelect;
+type OutboundActionRecord = typeof outboundActions.$inferSelect;
 type ResourceRecord = typeof resources.$inferSelect;
 
 type EventCursor = {
@@ -230,6 +233,15 @@ export class EventDal {
     return result[0] ?? null;
   }
 
+  async findById(id: string): Promise<EventRecord | null> {
+    const result = await db
+      .select()
+      .from(events)
+      .where(and(eq(events.orgId, this.orgId), eq(events.id, id)))
+      .limit(1);
+    return result[0] ?? null;
+  }
+
   async listByAgent(
     agentId: string,
     options: {
@@ -436,6 +448,93 @@ export class EventDal {
   }
 }
 
+export class OutboundActionDal {
+  private readonly orgId: string;
+
+  constructor(orgId: string) {
+    this.orgId = requireOrgId(orgId);
+  }
+
+  async findByIdempotencyKey(idempotencyKey: string): Promise<OutboundActionRecord | null> {
+    const result = await db
+      .select()
+      .from(outboundActions)
+      .where(
+        and(
+          eq(outboundActions.orgId, this.orgId),
+          eq(outboundActions.idempotencyKey, idempotencyKey),
+        ),
+      )
+      .limit(1);
+    return result[0] ?? null;
+  }
+
+  async insert(
+    data: Omit<NewOutboundAction, 'orgId' | 'id' | 'createdAt' | 'updatedAt'> & { id: string },
+  ): Promise<OutboundActionRecord> {
+    const result = await db
+      .insert(outboundActions)
+      .values({ ...data, orgId: this.orgId })
+      .returning();
+    return result[0];
+  }
+
+  async updateById(
+    id: string,
+    data: Partial<
+      Omit<
+        NewOutboundAction,
+        'orgId' | 'id' | 'createdAt' | 'updatedAt' | 'action' | 'idempotencyKey'
+      >
+    >,
+  ): Promise<OutboundActionRecord | null> {
+    const result = await db
+      .update(outboundActions)
+      .set({ ...data, updatedAt: new Date() })
+      .where(and(eq(outboundActions.orgId, this.orgId), eq(outboundActions.id, id)))
+      .returning();
+    return result[0] ?? null;
+  }
+
+  async createReady(input: {
+    id: string;
+    agentId: string;
+    resourceId: string;
+    provider: string;
+    action: OutboundActionType;
+    idempotencyKey: string;
+    requestHash: string;
+    requestData: Record<string, unknown>;
+  }): Promise<OutboundActionRecord> {
+    return this.insert({
+      ...input,
+      providerResult: null,
+      eventId: null,
+      lastError: null,
+      state: 'ready',
+    });
+  }
+
+  async transitionState(
+    id: string,
+    state: OutboundActionState,
+    updates?: {
+      requestData?: Record<string, unknown>;
+      providerResult?: Record<string, unknown> | null;
+      eventId?: string | null;
+      lastError?: Record<string, unknown> | null;
+    },
+  ): Promise<OutboundActionRecord | null> {
+    return this.updateById(id, {
+      state,
+      requestData: updates?.requestData,
+      providerResult: updates?.providerResult,
+      eventId: updates?.eventId,
+      lastError: updates?.lastError,
+    });
+  }
+}
+
 export class ResourceDal {
   private readonly orgId: string;
 
@@ -528,6 +627,10 @@ export class DalFactory {
 
   get resources() {
     return new ResourceDal(this.orgId);
+  }
+
+  get outboundActions() {
+    return new OutboundActionDal(this.orgId);
   }
 }
 

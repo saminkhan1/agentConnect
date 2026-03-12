@@ -8,6 +8,14 @@ import actionsRoutes from './routes/actions';
 import agentsRoutes from './routes/agents';
 import eventsRoutes from './routes/events';
 import healthRoutes from './routes/health';
+import {
+  applyCorsHeaders,
+  getOriginHeader,
+  isAllowedBrowserOrigin,
+  parseAllowedBrowserOrigins,
+} from './routes/mcp-cors';
+import mcpRoutes from './routes/mcp';
+import messagesRoutes from './routes/messages';
 import orgRoutes from './routes/orgs';
 import resourceRoutes from './routes/resources';
 import timelineRoutes from './routes/timeline';
@@ -15,12 +23,14 @@ import webhookRoutes from './routes/webhooks';
 import authPlugin from '../plugins/auth';
 import { getServerConfig } from '../config';
 import dbPlugin from '../plugins/db';
+import { AppError } from '../domain/errors';
 import eventServicesPlugin from '../plugins/event-services';
 import resourceServicesPlugin from '../plugins/resource-services';
 import webhookServicesPlugin from '../plugins/webhook-services';
 
 export async function buildServer() {
   const config = getServerConfig(process.env);
+  const mcpAllowedOrigins = parseAllowedBrowserOrigins(config.MCP_ALLOWED_ORIGINS);
   const server = Fastify({
     logger: config.NODE_ENV === 'test' ? false : { level: config.LOG_LEVEL },
     requestIdHeader: 'x-correlation-id',
@@ -35,6 +45,10 @@ export async function buildServer() {
   server.setErrorHandler((error: FastifyError, request, reply) => {
     if (error.validation) {
       return reply.code(400).send({ message: error.message });
+    }
+
+    if (error instanceof AppError) {
+      return reply.code(error.httpStatus).send({ message: error.message });
     }
 
     const statusCode = error.statusCode ?? 500;
@@ -57,6 +71,17 @@ export async function buildServer() {
 
   server.addHook('onSend', async (request, reply, _payload) => {
     reply.header('x-correlation-id', request.id);
+
+    if (
+      config.MCP_HTTP_ENABLED &&
+      request.url.startsWith('/mcp') &&
+      !reply.hasHeader('Access-Control-Allow-Origin')
+    ) {
+      const origin = getOriginHeader(request.headers);
+      if (origin && isAllowedBrowserOrigin(origin, mcpAllowedOrigins)) {
+        applyCorsHeaders(reply.raw, origin);
+      }
+    }
   });
 
   await server.register(webhookRoutes);
@@ -67,6 +92,11 @@ export async function buildServer() {
   await server.register(timelineRoutes);
   await server.register(resourceRoutes);
   await server.register(actionsRoutes);
+  await server.register(messagesRoutes);
+
+  if (config.MCP_HTTP_ENABLED) {
+    await server.register(mcpRoutes);
+  }
 
   return server;
 }

@@ -1,33 +1,83 @@
 import crypto from 'node:crypto';
 
 import type { InferSelectModel } from 'drizzle-orm';
+import type { FastifyReply } from 'fastify';
 import type { FastifyPluginCallbackZod } from 'fastify-type-provider-zod';
 import fp from 'fastify-plugin';
 
+import type { AgentMailAdapter } from '../../adapters/agentmail-adapter';
 import {
+  createCardDetailsSessionBodySchema,
+  createCardDetailsSessionParamsSchema,
+  createCardDetailsSessionResponseSchema,
+  issuedCardMetadataSchema,
   issueCardBodySchema,
   issueCardParamsSchema,
   issueCardResponseSchema,
+  replyEmailBodySchema,
+  replyEmailParamsSchema,
+  replyEmailResponseSchema,
   sendEmailBodySchema,
   sendEmailParamsSchema,
   sendEmailResponseSchema,
 } from '../schemas/actions';
 import { errorResponseSchema } from '../schemas/common';
+import { sleep, withTimeout } from '../../adapters/provider-client';
 import type { DalFactory } from '../../db/dal';
 import { events as eventsTable, resources as resourcesTable } from '../../db/schema';
-import { requireScope } from '../../plugins/auth';
-import { enforceEmailPolicy } from '../../domain/policy';
-import { redactSensitive } from '../../domain/redact';
 import { EVENT_TYPES } from '../../domain/events';
+import { AppError } from '../../domain/errors';
+import { requireKeyType, requireScope } from '../../plugins/auth';
+import { replyFromAgentMailError } from './agentmail-errors';
+import { replyFromStripeError } from './stripe-errors';
+import {
+  normalizeEmailAddress,
+  normalizeEmailAddressArray,
+  normalizeOptionalString,
+  normalizeSortedStringArray,
+  readStringArray,
+} from './email-utils';
 import { serializeEvent } from './events';
+import {
+  MSG_IDEMPOTENCY_DIFFERENT_ACTION,
+  type PrepareInitialRequestDataResult,
+  executeOutboundEmailAction,
+} from './outbound-email-actions';
 import { serializeResource } from './resources';
 
 type EventRecord = InferSelectModel<typeof eventsTable>;
 type ResourceRecord = InferSelectModel<typeof resourcesTable>;
+type EmailAddressInput = string | string[];
+type AgentMailSendResult = {
+  message_id: string;
+  thread_id?: string;
+};
+type SendEmailActionRequestData = {
+  to: string[];
+  subject: string;
+  text: string;
+  html?: string;
+  cc?: string[];
+  bcc?: string[];
+  reply_to?: EmailAddressInput;
+};
+type ReplyEmailActionRequestData = {
+  message_id: string;
+  text: string;
+  html?: string;
+  cc?: string[];
+  bcc?: string[];
+  reply_to?: EmailAddressInput;
+  subject?: string;
+  reply_recipients: string[];
+};
 
-const MSG_IDEMPOTENCY_DIFFERENT_ACTION = 'Idempotency key already used for a different action';
+const ADAPTER_TIMEOUT_MS = 30_000;
+
 const MSG_IDEMPOTENCY_DIFFERENT_EMAIL =
   'Idempotency key already used with different email parameters';
+const MSG_IDEMPOTENCY_DIFFERENT_REPLY =
+  'Idempotency key already used with different reply parameters';
 
 function buildIdempotentCardResourceId(orgId: string, idempotencyKey: string) {
   const digest = crypto
@@ -51,21 +101,123 @@ function normalizeSpendingLimits(value: unknown) {
         return [];
       }
 
-      return [{ amount: candidate['amount'], interval: candidate['interval'] }];
+      const categories = normalizeSortedStringArray(candidate['categories']);
+      return [
+        {
+          amount: candidate['amount'],
+          interval: candidate['interval'],
+          ...(categories.length > 0 ? { categories } : {}),
+        },
+      ];
     })
     .sort(
-      (left, right) => left.amount - right.amount || left.interval.localeCompare(right.interval),
+      (left, right) =>
+        left.amount - right.amount ||
+        left.interval.localeCompare(right.interval) ||
+        JSON.stringify(left.categories ?? []).localeCompare(JSON.stringify(right.categories ?? [])),
     );
 }
 
-function normalizeStringArray(value: unknown) {
-  return (Array.isArray(value) ? value : [])
-    .filter((entry): entry is string => typeof entry === 'string')
-    .sort((left, right) => left.localeCompare(right));
+function normalizeBillingAddress(value: unknown) {
+  if (!isObjectRecord(value)) {
+    return {
+      line1: '',
+      line2: '',
+      city: '',
+      state: '',
+      postal_code: '',
+      country: '',
+    };
+  }
+
+  return {
+    line1: normalizeOptionalString(value['line1']),
+    line2: normalizeOptionalString(value['line2']),
+    city: normalizeOptionalString(value['city']),
+    state: normalizeOptionalString(value['state']),
+    postal_code: normalizeOptionalString(value['postal_code']),
+    country: normalizeOptionalString(value['country']).toUpperCase(),
+  };
 }
 
-function normalizeOptionalString(value: unknown) {
-  return typeof value === 'string' ? value : '';
+function normalizeCurrency(value: unknown) {
+  return normalizeOptionalString(value).toLowerCase();
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function readEmailAddressInput(value: unknown): EmailAddressInput | null {
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  const addresses = readStringArray(value);
+  return addresses.length > 0 ? addresses : null;
+}
+
+function normalizeReplyToHashValue(value: EmailAddressInput | undefined) {
+  if (value === undefined) {
+    return [];
+  }
+
+  if (typeof value === 'string') {
+    return normalizeOptionalString(value);
+  }
+
+  return normalizeSortedStringArray(value);
+}
+
+function parseSendEmailActionRequestData(value: unknown): SendEmailActionRequestData | null {
+  if (!isObjectRecord(value)) {
+    return null;
+  }
+
+  const to = readStringArray(value['to']);
+  const subject = typeof value['subject'] === 'string' ? value['subject'] : null;
+  const text = typeof value['text'] === 'string' ? value['text'] : null;
+  if (to.length === 0 || !subject || text === null) {
+    return null;
+  }
+
+  const replyTo = readEmailAddressInput(value['reply_to']);
+
+  return {
+    to,
+    subject,
+    text,
+    ...(typeof value['html'] === 'string' ? { html: value['html'] } : {}),
+    ...(readStringArray(value['cc']).length > 0 ? { cc: readStringArray(value['cc']) } : {}),
+    ...(readStringArray(value['bcc']).length > 0 ? { bcc: readStringArray(value['bcc']) } : {}),
+    ...(replyTo !== null ? { reply_to: replyTo } : {}),
+  };
+}
+
+function parseReplyEmailActionRequestData(value: unknown): ReplyEmailActionRequestData | null {
+  if (!isObjectRecord(value)) {
+    return null;
+  }
+
+  const messageId = typeof value['message_id'] === 'string' ? value['message_id'] : null;
+  const text = typeof value['text'] === 'string' ? value['text'] : null;
+  const replyRecipients = readStringArray(value['reply_recipients']);
+  if (!messageId || text === null || replyRecipients.length === 0) {
+    return null;
+  }
+
+  const replyTo = readEmailAddressInput(value['reply_to']);
+
+  return {
+    message_id: messageId,
+    text,
+    reply_recipients: replyRecipients,
+    ...(typeof value['html'] === 'string' ? { html: value['html'] } : {}),
+    ...(readStringArray(value['cc']).length > 0 ? { cc: readStringArray(value['cc']) } : {}),
+    ...(readStringArray(value['bcc']).length > 0 ? { bcc: readStringArray(value['bcc']) } : {}),
+    ...(replyTo !== null ? { reply_to: replyTo } : {}),
+    ...(typeof value['subject'] === 'string' ? { subject: value['subject'] } : {}),
+  };
 }
 
 function buildSendEmailRequestHash(
@@ -77,7 +229,7 @@ function buildSendEmailRequestHash(
     html?: string;
     cc?: string[];
     bcc?: string[];
-    reply_to?: string;
+    reply_to?: EmailAddressInput;
   },
 ) {
   return crypto
@@ -85,23 +237,82 @@ function buildSendEmailRequestHash(
     .update(
       JSON.stringify({
         from: resource.providerRef ?? '',
-        to: normalizeStringArray(payload.to),
-        cc: normalizeStringArray(payload.cc),
-        bcc: normalizeStringArray(payload.bcc),
+        to: normalizeSortedStringArray(payload.to),
+        cc: normalizeSortedStringArray(payload.cc),
+        bcc: normalizeSortedStringArray(payload.bcc),
         subject: payload.subject,
         text: payload.text,
         html: normalizeOptionalString(payload.html),
-        reply_to: normalizeOptionalString(payload.reply_to),
+        reply_to: normalizeReplyToHashValue(payload.reply_to),
       }),
     )
     .digest('hex');
 }
 
+function buildReplyEmailRequestHash(
+  resource: ResourceRecord,
+  payload: {
+    message_id: string;
+    text: string;
+    html?: string;
+    cc?: string[];
+    bcc?: string[];
+    reply_to?: EmailAddressInput;
+  },
+) {
+  return crypto
+    .createHash('sha256')
+    .update(
+      JSON.stringify({
+        from: resource.providerRef ?? '',
+        message_id: payload.message_id,
+        text: payload.text,
+        html: normalizeOptionalString(payload.html),
+        cc: normalizeSortedStringArray(payload.cc),
+        bcc: normalizeSortedStringArray(payload.bcc),
+        reply_to: normalizeReplyToHashValue(payload.reply_to),
+      }),
+    )
+    .digest('hex');
+}
+
+function resolveReplyRecipients(message: Record<string, unknown>, resource: ResourceRecord) {
+  const replyTo = normalizeEmailAddressArray(message['reply_to']);
+  if (replyTo.length > 0) {
+    return replyTo;
+  }
+
+  const from = normalizeEmailAddress(message['from']);
+  const normalizedProviderRef = normalizeEmailAddress(resource.providerRef);
+  const normalizedConfigAddress = normalizeEmailAddress(resource.config['email_address']);
+  const resourceEmailAddresses = new Set(
+    [normalizedProviderRef, normalizedConfigAddress]
+      .filter((value): value is string => value !== null)
+      .map((value) => value.toLowerCase()),
+  );
+
+  if (from && !resourceEmailAddresses.has(from.toLowerCase())) {
+    return [from];
+  }
+
+  const to = normalizeEmailAddressArray(message['to']);
+  if (to.length > 0) {
+    return to;
+  }
+
+  return from ? [from] : [];
+}
+
 function normalizeCardIssuanceConfig(config: Record<string, unknown>) {
   return {
+    cardholder_name: normalizeOptionalString(config['cardholder_name']),
+    billing_address: normalizeBillingAddress(config['billing_address']),
+    currency: normalizeCurrency(config['currency']),
     spending_limits: normalizeSpendingLimits(config['spending_limits']),
-    allowed_categories: normalizeStringArray(config['allowed_categories']),
-    allowed_merchant_countries: normalizeStringArray(config['allowed_merchant_countries']),
+    allowed_categories: normalizeSortedStringArray(config['allowed_categories']),
+    blocked_categories: normalizeSortedStringArray(config['blocked_categories']),
+    allowed_merchant_countries: normalizeSortedStringArray(config['allowed_merchant_countries']),
+    blocked_merchant_countries: normalizeSortedStringArray(config['blocked_merchant_countries']),
   };
 }
 
@@ -128,41 +339,161 @@ function isIssuedCardEventForResource(event: EventRecord, agentId: string, resou
   );
 }
 
-function isSentEmailEventForResource(event: EventRecord, agentId: string, resourceId: string) {
-  return (
-    event.eventType === EVENT_TYPES.EMAIL_SENT &&
-    event.agentId === agentId &&
-    event.resourceId === resourceId
-  );
-}
-
-function buildReplayableCard(resource: ResourceRecord, sensitiveData?: Record<string, unknown>) {
-  const source = sensitiveData ?? resource.config;
+function buildSendEmailEventData(
+  emailResource: ResourceRecord,
+  requestData: SendEmailActionRequestData,
+  providerResult: AgentMailSendResult,
+  requestHash: string,
+) {
   return {
-    number: typeof source['number'] === 'string' ? source['number'] : null,
-    cvc: typeof source['cvc'] === 'string' ? source['cvc'] : null,
-    exp_month: typeof source['exp_month'] === 'number' ? source['exp_month'] : 0,
-    exp_year: typeof source['exp_year'] === 'number' ? source['exp_year'] : 0,
-    last4: typeof source['last4'] === 'string' ? source['last4'] : '',
+    message_id: providerResult.message_id,
+    ...(providerResult.thread_id ? { thread_id: providerResult.thread_id } : {}),
+    from: emailResource.providerRef,
+    to: requestData.to,
+    ...(requestData.cc ? { cc: requestData.cc } : {}),
+    ...(requestData.bcc ? { bcc: requestData.bcc } : {}),
+    subject: requestData.subject,
+    request_hash: requestHash,
   };
 }
 
-function serializeIssueCardResponse(
-  resource: ResourceRecord,
-  event: EventRecord,
-  sensitiveData?: Record<string, unknown>,
+function buildReplyEmailEventData(
+  emailResource: ResourceRecord,
+  requestData: ReplyEmailActionRequestData,
+  providerResult: AgentMailSendResult,
+  requestHash: string,
 ) {
   return {
+    message_id: providerResult.message_id,
+    ...(providerResult.thread_id ? { thread_id: providerResult.thread_id } : {}),
+    from: emailResource.providerRef,
+    to: requestData.reply_recipients,
+    in_reply_to_message_id: requestData.message_id,
+    ...(requestData.cc ? { cc: requestData.cc } : {}),
+    ...(requestData.bcc ? { bcc: requestData.bcc } : {}),
+    ...(requestData.subject ? { subject: requestData.subject } : {}),
+    request_hash: requestHash,
+  };
+}
+
+function buildSendEmailAdapterPayload(requestData: SendEmailActionRequestData) {
+  return {
+    to: requestData.to,
+    subject: requestData.subject,
+    text: requestData.text,
+    html: requestData.html,
+    cc: requestData.cc,
+    bcc: requestData.bcc,
+    ...(requestData.reply_to !== undefined ? { replyTo: requestData.reply_to } : {}),
+  };
+}
+
+function buildReplyEmailAdapterPayload(requestData: ReplyEmailActionRequestData) {
+  return {
+    message_id: requestData.message_id,
+    text: requestData.text,
+    html: requestData.html,
+    cc: requestData.cc,
+    bcc: requestData.bcc,
+    reply_recipients: requestData.reply_recipients,
+    ...(requestData.reply_to !== undefined ? { replyTo: requestData.reply_to } : {}),
+  };
+}
+
+async function prepareReplyEmailRequestData(
+  reply: FastifyReply,
+  adapter: AgentMailAdapter,
+  resource: ResourceRecord,
+  input: {
+    message_id: string;
+    text: string;
+    html?: string;
+    cc?: string[];
+    bcc?: string[];
+    reply_to?: EmailAddressInput;
+  },
+): Promise<PrepareInitialRequestDataResult<ReplyEmailActionRequestData>> {
+  let originalMessage: Record<string, unknown>;
+  try {
+    originalMessage = await withTimeout(
+      () =>
+        adapter.performAction(resource, 'get_message', {
+          message_id: input.message_id,
+        }),
+      ADAPTER_TIMEOUT_MS,
+    );
+  } catch (error) {
+    if (replyFromAgentMailError(reply, error, 'Failed to load original message')) {
+      return { kind: 'response_sent' };
+    }
+
+    throw error;
+  }
+
+  const replyRecipients = resolveReplyRecipients(originalMessage, resource);
+  if (replyRecipients.length === 0) {
+    reply.code(500).send({ message: 'Unable to resolve reply recipients for policy enforcement' });
+    return { kind: 'response_sent' };
+  }
+
+  return {
+    kind: 'ok',
+    requestData: {
+      message_id: input.message_id,
+      text: input.text,
+      reply_recipients: replyRecipients,
+      ...(input.html !== undefined ? { html: input.html } : {}),
+      ...(input.cc !== undefined ? { cc: input.cc } : {}),
+      ...(input.bcc !== undefined ? { bcc: input.bcc } : {}),
+      ...(input.reply_to !== undefined ? { reply_to: input.reply_to } : {}),
+      ...(typeof originalMessage['subject'] === 'string'
+        ? { subject: originalMessage['subject'] }
+        : {}),
+    },
+  };
+}
+
+function buildIssuedCardMetadata(resource: ResourceRecord) {
+  const parsedMetadata = issuedCardMetadataSchema.safeParse(resource.config);
+  if (!parsedMetadata.success) {
+    throw new AppError(
+      'INTERNAL',
+      500,
+      `Stored Stripe card metadata is invalid for resource ${resource.id}`,
+    );
+  }
+
+  return parsedMetadata.data;
+}
+
+function serializeIssueCardResponse(resource: ResourceRecord, event: EventRecord) {
+  return {
     resource: serializeResource(resource),
-    card: buildReplayableCard(resource, sensitiveData),
+    card: buildIssuedCardMetadata(resource),
     event: serializeEvent(event),
   };
 }
 
-function wait(ms: number) {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
+function serializeCardDetailsSessionResponse(
+  resource: ResourceRecord,
+  session: {
+    cardId: string;
+    ephemeralKeySecret: string;
+    expiresAt: number;
+    livemode: boolean;
+    apiVersion: string;
+  },
+) {
+  return {
+    session: {
+      resource_id: resource.id,
+      card_id: session.cardId,
+      ephemeral_key_secret: session.ephemeralKeySecret,
+      expires_at: session.expiresAt,
+      livemode: session.livemode,
+      stripe_api_version: session.apiVersion,
+    },
+  };
 }
 
 async function waitForIssuedCardReplay(
@@ -170,7 +501,11 @@ async function waitForIssuedCardReplay(
   resourceId: string,
   idempotencyKey: string,
 ) {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  const MAX_ATTEMPTS = 8;
+  const BASE_DELAY_MS = 50;
+  const MAX_DELAY_MS = 200;
+
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
     const [event, resource] = await Promise.all([
       dal.events.findByIdempotencyKey(idempotencyKey),
       dal.resources.findById(resourceId),
@@ -190,7 +525,10 @@ async function waitForIssuedCardReplay(
       return null;
     }
 
-    await wait(100);
+    const delay =
+      Math.min(BASE_DELAY_MS * 2 ** attempt, MAX_DELAY_MS) +
+      Math.floor(Math.random() * BASE_DELAY_MS);
+    await sleep(delay);
   }
 
   return null;
@@ -206,8 +544,11 @@ const actionsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
         body: sendEmailBodySchema,
         response: {
           200: sendEmailResponseSchema,
+          400: errorResponseSchema,
           401: errorResponseSchema,
+          422: errorResponseSchema,
           409: errorResponseSchema,
+          429: errorResponseSchema,
           403: errorResponseSchema,
           404: errorResponseSchema,
           500: errorResponseSchema,
@@ -215,100 +556,38 @@ const actionsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
       },
     },
     async (request, reply) => {
-      if (!request.auth) {
-        return reply.code(401).send({ message: 'Unauthorized' });
-      }
-
-      const { org_id: orgId } = request.auth;
-      const dal = request.dalFactory(orgId);
-      const agentId = request.params.id;
-
-      const agent = await dal.agents.findById(agentId);
-      if (!agent || agent.isArchived) {
-        return reply.code(404).send({ message: 'Agent not found' });
-      }
-
-      const emailResource = await dal.resources.findActiveByAgentIdAndType(
-        agentId,
-        'email_inbox',
-        'agentmail',
-      );
-      if (!emailResource) {
-        return reply.code(404).send({ message: 'No active agentmail email inbox found for agent' });
-      }
-
-      const { to, subject, text, html, cc, bcc, reply_to, idempotency_key } = request.body;
-      const policyResult = enforceEmailPolicy(emailResource.config, { to, cc, bcc });
-      if (!policyResult.allowed) {
-        return reply.code(403).send({ message: policyResult.reasons.join('; ') });
-      }
-
-      const requestHash = buildSendEmailRequestHash(emailResource, {
-        to,
-        subject,
-        text,
-        html,
-        cc,
-        bcc,
-        reply_to,
-      });
-
-      if (idempotency_key) {
-        const existingEvent = await dal.events.findByIdempotencyKey(idempotency_key);
-        if (existingEvent) {
-          if (!isSentEmailEventForResource(existingEvent, agentId, emailResource.id)) {
-            return reply.code(409).send({ message: MSG_IDEMPOTENCY_DIFFERENT_ACTION });
-          }
-
-          const existingRequestHash =
-            typeof existingEvent.data['request_hash'] === 'string'
-              ? existingEvent.data['request_hash']
-              : null;
-          if (existingRequestHash && existingRequestHash !== requestHash) {
-            return reply.code(409).send({ message: MSG_IDEMPOTENCY_DIFFERENT_EMAIL });
-          }
-
-          return reply.code(200).send({ event: serializeEvent(existingEvent) });
-        }
-      }
-
-      const adapter = server.agentMailAdapter;
-      if (!adapter) {
-        return reply.code(500).send({ message: 'AgentMail adapter not configured' });
-      }
-
-      const actionResult = await adapter.performAction(emailResource, 'send_email', {
-        to,
-        subject,
-        text,
-        html,
-        cc,
-        bcc,
-        replyTo: reply_to,
-      });
-
-      const { event } = await server.eventWriter.writeEvent({
-        orgId,
-        agentId,
-        resourceId: emailResource.id,
-        provider: 'agentmail',
-        eventType: EVENT_TYPES.EMAIL_SENT,
-        idempotencyKey: idempotency_key,
-        data: {
-          message_id: (actionResult['message_id'] as string) || '',
-          ...(typeof actionResult['thread_id'] === 'string'
-            ? { thread_id: actionResult['thread_id'] }
-            : {}),
-          from: emailResource.providerRef,
-          to,
-          ...(cc ? { cc } : {}),
-          ...(bcc ? { bcc } : {}),
-          subject,
-          request_hash: requestHash,
+      return executeOutboundEmailAction({
+        request,
+        reply,
+        agentId: request.params.id,
+        input: request.body,
+        config: {
+          actionType: 'send_email',
+          conflictMessage: MSG_IDEMPOTENCY_DIFFERENT_EMAIL,
+          dispatchFailureMessage: 'Failed to send email',
+          buildRequestHash: buildSendEmailRequestHash,
+          prepareInitialRequestData: ({ input }) => ({
+            kind: 'ok',
+            requestData: {
+              to: input.to,
+              subject: input.subject,
+              text: input.text,
+              ...(input.html !== undefined ? { html: input.html } : {}),
+              ...(input.cc !== undefined ? { cc: input.cc } : {}),
+              ...(input.bcc !== undefined ? { bcc: input.bcc } : {}),
+              ...(input.reply_to !== undefined ? { reply_to: input.reply_to } : {}),
+            },
+          }),
+          parseStoredRequestData: parseSendEmailActionRequestData,
+          getPolicyRecipients: (requestData) => ({
+            to: requestData.to,
+            cc: requestData.cc,
+            bcc: requestData.bcc,
+          }),
+          buildAdapterPayload: buildSendEmailAdapterPayload,
+          buildEventData: buildSendEmailEventData,
         },
       });
-
-      return reply.code(200).send({ event: serializeEvent(event) });
     },
   );
 
@@ -325,11 +604,14 @@ const actionsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
         body: issueCardBodySchema,
         response: {
           200: issueCardResponseSchema,
+          202: errorResponseSchema,
           401: errorResponseSchema,
           409: errorResponseSchema,
           403: errorResponseSchema,
           404: errorResponseSchema,
           500: errorResponseSchema,
+          502: errorResponseSchema,
+          503: errorResponseSchema,
         },
       },
     },
@@ -347,14 +629,27 @@ const actionsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
         return reply.code(404).send({ message: 'Agent not found' });
       }
 
-      const { spending_limits, allowed_categories, allowed_merchant_countries, idempotency_key } =
-        request.body;
+      const {
+        cardholder_name,
+        billing_address,
+        currency,
+        spending_limits,
+        allowed_categories,
+        blocked_categories,
+        allowed_merchant_countries,
+        blocked_merchant_countries,
+        idempotency_key,
+      } = request.body;
 
       const config: Record<string, unknown> = {
-        billing_name: agent.name,
-        spending_limits,
+        cardholder_name,
+        billing_address,
+        currency,
+        ...(spending_limits !== undefined ? { spending_limits } : {}),
         ...(allowed_categories !== undefined ? { allowed_categories } : {}),
+        ...(blocked_categories !== undefined ? { blocked_categories } : {}),
         ...(allowed_merchant_countries !== undefined ? { allowed_merchant_countries } : {}),
+        ...(blocked_merchant_countries !== undefined ? { blocked_merchant_countries } : {}),
       };
       const idempotentResourceId = idempotency_key
         ? buildIdempotentCardResourceId(orgId, idempotency_key)
@@ -407,14 +702,26 @@ const actionsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
         return reply.code(500).send({ message: 'Stripe adapter not configured' });
       }
 
-      const { resource, sensitiveData, reusedExisting } = await server.resourceManager.provision(
-        dal,
-        agentId,
-        'card',
-        'stripe',
-        config,
-        { resourceId: idempotentResourceId },
-      );
+      let resource: ResourceRecord;
+      let reusedExisting: boolean | undefined;
+      try {
+        const provisioned = await server.resourceManager.provision(
+          dal,
+          agentId,
+          'card',
+          'stripe',
+          config,
+          { resourceId: idempotentResourceId },
+        );
+        resource = provisioned.resource;
+        reusedExisting = provisioned.reusedExisting;
+      } catch (error) {
+        if (replyFromStripeError(reply, error, 'Stripe card provisioning failed')) {
+          return;
+        }
+
+        throw error;
+      }
 
       if (reusedExisting) {
         if (!idempotency_key) {
@@ -454,8 +761,8 @@ const actionsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
           }
 
           return reply
-            .code(409)
-            .send({ message: 'Card issuance already in progress for this idempotency key' });
+            .code(202)
+            .send({ message: `Card issuance in progress (resource: ${resource.id})` });
         }
 
         if (resource.state !== 'active') {
@@ -501,10 +808,123 @@ const actionsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
         return reply.code(409).send({ message: MSG_IDEMPOTENCY_DIFFERENT_ACTION });
       }
 
-      // Redact before any further logging; actual values returned to caller once
-      request.log.debug({ card: redactSensitive(sensitiveData ?? {}) }, 'Card details issued');
+      return reply.code(200).send(serializeIssueCardResponse(resource, event));
+    },
+  );
 
-      return reply.code(200).send(serializeIssueCardResponse(resource, event, sensitiveData));
+  server.post(
+    '/agents/:id/actions/create_card_details_session',
+    {
+      preHandler: [requireScope('agents:write'), requireKeyType('root')],
+      schema: {
+        params: createCardDetailsSessionParamsSchema,
+        body: createCardDetailsSessionBodySchema,
+        response: {
+          200: createCardDetailsSessionResponseSchema,
+          400: errorResponseSchema,
+          401: errorResponseSchema,
+          403: errorResponseSchema,
+          404: errorResponseSchema,
+          409: errorResponseSchema,
+          500: errorResponseSchema,
+          502: errorResponseSchema,
+          503: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      if (!request.auth) {
+        return reply.code(401).send({ message: 'Unauthorized' });
+      }
+
+      const dal = request.dalFactory(request.auth.org_id);
+      const agent = await dal.agents.findById(request.params.id);
+      if (!agent || agent.isArchived) {
+        return reply.code(404).send({ message: 'Agent not found' });
+      }
+
+      const resource = await dal.resources.findById(request.body.resource_id);
+      if (!resource || !isStripeCardResourceForAgent(resource, request.params.id)) {
+        return reply.code(404).send({ message: 'Card resource not found' });
+      }
+
+      if (resource.state !== 'active') {
+        return reply.code(409).send({ message: 'Card resource is not active' });
+      }
+
+      if (!server.stripeAdapter) {
+        return reply.code(500).send({ message: 'Stripe adapter not configured' });
+      }
+
+      try {
+        const session = await server.stripeAdapter.createCardDetailsSession(
+          resource,
+          request.body.nonce,
+        );
+
+        request.log.info(
+          { resourceId: resource.id, expiresAt: session.expiresAt },
+          'Created Stripe card details session',
+        );
+
+        return await reply.code(200).send(serializeCardDetailsSessionResponse(resource, session));
+      } catch (error) {
+        if (replyFromStripeError(reply, error, 'Stripe card details session failed')) {
+          return;
+        }
+
+        throw error;
+      }
+    },
+  );
+
+  // ---------------------------------------------------------------------------
+  // POST /agents/:id/actions/reply_email
+  // ---------------------------------------------------------------------------
+
+  server.post(
+    '/agents/:id/actions/reply_email',
+    {
+      preHandler: [requireScope('agents:write')],
+      schema: {
+        params: replyEmailParamsSchema,
+        body: replyEmailBodySchema,
+        response: {
+          200: replyEmailResponseSchema,
+          400: errorResponseSchema,
+          401: errorResponseSchema,
+          422: errorResponseSchema,
+          409: errorResponseSchema,
+          429: errorResponseSchema,
+          403: errorResponseSchema,
+          404: errorResponseSchema,
+          500: errorResponseSchema,
+        },
+      },
+    },
+    async (request, reply) => {
+      return executeOutboundEmailAction({
+        request,
+        reply,
+        agentId: request.params.id,
+        input: request.body,
+        config: {
+          actionType: 'reply_email',
+          conflictMessage: MSG_IDEMPOTENCY_DIFFERENT_REPLY,
+          dispatchFailureMessage: 'Failed to send reply',
+          buildRequestHash: buildReplyEmailRequestHash,
+          prepareInitialRequestData: ({ reply, adapter, resource, input }) =>
+            prepareReplyEmailRequestData(reply, adapter, resource, input),
+          parseStoredRequestData: parseReplyEmailActionRequestData,
+          getPolicyRecipients: (requestData) => ({
+            to: requestData.reply_recipients,
+            cc: requestData.cc,
+            bcc: requestData.bcc,
+          }),
+          buildAdapterPayload: buildReplyEmailAdapterPayload,
+          buildEventData: buildReplyEmailEventData,
+        },
+      });
     },
   );
 

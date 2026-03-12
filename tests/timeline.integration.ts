@@ -227,9 +227,9 @@ void test('integration: derived timeline groups items and paginates without spli
   }
 });
 
-void test('integration: derived timeline folds legacy send events into threaded email items', async () => {
+void test('integration: derived timeline folds send events without an initial thread_id into threaded email items', async () => {
   const server = await buildServer();
-  const orgId = `org_timeline_legacy_${crypto.randomUUID()}`;
+  const orgId = `org_timeline_missing_thread_${crypto.randomUUID()}`;
   const rootKey = await generateApiKeyMaterial();
   const authorization = `Bearer ${rootKey.plaintextKey}`;
 
@@ -237,7 +237,7 @@ void test('integration: derived timeline folds legacy send events into threaded 
     await server.systemDal.createOrgWithApiKey({
       org: {
         id: orgId,
-        name: 'Timeline Legacy Org',
+        name: 'Timeline Missing Thread Org',
       },
       apiKey: {
         id: rootKey.id,
@@ -250,7 +250,7 @@ void test('integration: derived timeline folds legacy send events into threaded 
       method: 'POST',
       url: '/agents',
       headers: { authorization },
-      payload: { name: 'Timeline Legacy Agent' },
+      payload: { name: 'Timeline Missing Thread Agent' },
     });
     assert.strictEqual(createAgentResponse.statusCode, 201);
     const createAgentPayload = JSON.parse(createAgentResponse.payload) as {
@@ -262,27 +262,27 @@ void test('integration: derived timeline folds legacy send events into threaded 
       orgId,
       agentId,
       provider: 'agentmail',
-      resourceId: 'res_email_legacy',
+      resourceId: 'res_email_missing_thread',
       eventType: EVENT_TYPES.EMAIL_SENT,
       occurredAt: '2026-03-06T10:00:00.000Z',
       data: {
-        message_id: 'msg_legacy_thread_1',
+        message_id: 'msg_missing_thread_1',
         from: 'agent@example.com',
         to: ['user@example.com'],
-        subject: 'Legacy send',
+        subject: 'Send without initial thread id',
       },
     });
     await server.eventWriter.writeEvent({
       orgId,
       agentId,
       provider: 'agentmail',
-      resourceId: 'res_email_legacy',
-      providerEventId: 'evt_timeline_legacy_delivery_1',
+      resourceId: 'res_email_missing_thread',
+      providerEventId: 'evt_timeline_delivery_missing_thread_1',
       eventType: EVENT_TYPES.EMAIL_DELIVERED,
       occurredAt: '2026-03-06T11:00:00.000Z',
       data: {
-        message_id: 'msg_legacy_thread_1',
-        thread_id: 'thread_legacy_1',
+        message_id: 'msg_missing_thread_1',
+        thread_id: 'thread_missing_initial_1',
       },
     });
 
@@ -303,7 +303,7 @@ void test('integration: derived timeline folds legacy send events into threaded 
 
     assert.strictEqual(payload.items.length, 1);
     assert.strictEqual(payload.items[0].kind, 'email_thread');
-    assert.strictEqual(payload.items[0].groupKey, 'thread_legacy_1');
+    assert.strictEqual(payload.items[0].groupKey, 'thread_missing_initial_1');
     assert.strictEqual(payload.items[0].eventCount, 2);
     assert.deepStrictEqual(
       payload.items[0].events.map((event) => event.eventType),

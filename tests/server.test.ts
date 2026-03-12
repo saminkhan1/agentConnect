@@ -157,97 +157,72 @@ void test('POST /orgs creates an org and returns a root key once', async () => {
   }
 });
 
-void test('POST /orgs/:id/api-keys returns 401 when auth header is missing', async () => {
-  const server = await buildServer();
-  try {
-    const response = await server.inject({
-      method: 'POST',
-      url: '/orgs/org_123/api-keys',
-    });
-
-    assert.strictEqual(response.statusCode, 401);
-    const rawPayload: unknown = JSON.parse(response.payload);
-    const payload = errorResponseSchema.parse(rawPayload);
-    assert.strictEqual(payload.message, 'Unauthorized');
-  } finally {
-    await server.close();
-  }
-});
-
-void test('POST /orgs/:id/api-keys returns 401 when auth header is malformed', async () => {
-  const server = await buildServer();
-  try {
-    const response = await server.inject({
-      method: 'POST',
-      url: '/orgs/org_123/api-keys',
-      headers: {
-        authorization: 'Bearer malformed-key',
-      },
-    });
-
-    assert.strictEqual(response.statusCode, 401);
-    const rawPayload: unknown = JSON.parse(response.payload);
-    const payload = errorResponseSchema.parse(rawPayload);
-    assert.strictEqual(payload.message, 'Unauthorized');
-  } finally {
-    await server.close();
-  }
-});
-
-void test('POST /orgs/:id/api-keys returns 401 when key id is unknown', async () => {
-  const server = await buildServer();
-  const originalGetApiKeyById = server.systemDal.getApiKeyById.bind(server.systemDal);
-  server.systemDal.getApiKeyById = (_id) => Promise.resolve(null);
-
-  try {
-    const response = await server.inject({
-      method: 'POST',
-      url: '/orgs/org_123/api-keys',
-      headers: {
-        authorization: 'Bearer sk_key_missing.secret',
-      },
-    });
-
-    assert.strictEqual(response.statusCode, 401);
-    const rawPayload: unknown = JSON.parse(response.payload);
-    const payload = errorResponseSchema.parse(rawPayload);
-    assert.strictEqual(payload.message, 'Unauthorized');
-  } finally {
-    server.systemDal.getApiKeyById = originalGetApiKeyById;
-    await server.close();
-  }
-});
-
-void test('POST /orgs/:id/api-keys returns 401 when key secret is invalid', async () => {
-  const server = await buildServer();
+void test('POST /orgs/:id/api-keys returns 401 for invalid auth variants', async () => {
   const knownRootKey = await generateApiKeyMaterial();
-  const originalGetApiKeyById = server.systemDal.getApiKeyById.bind(server.systemDal);
-  server.systemDal.getApiKeyById = (_id) =>
-    Promise.resolve({
-      id: knownRootKey.id,
-      orgId: 'org_123',
-      keyType: 'root',
-      keyHash: knownRootKey.keyHash,
-      isRevoked: false,
-      createdAt: new Date('2026-03-01T00:00:00.000Z'),
-    });
-
-  try {
-    const response = await server.inject({
-      method: 'POST',
-      url: '/orgs/org_123/api-keys',
+  const cases = [
+    {
+      name: 'missing auth header',
+      headers: undefined,
+      setup: (_server: Awaited<ReturnType<typeof buildServer>>) => () => {},
+    },
+    {
+      name: 'malformed auth header',
+      headers: { authorization: 'Bearer malformed-key' },
+      setup: (_server: Awaited<ReturnType<typeof buildServer>>) => () => {},
+    },
+    {
+      name: 'unknown key id',
+      headers: { authorization: 'Bearer sk_key_missing.secret' },
+      setup: (server: Awaited<ReturnType<typeof buildServer>>) => {
+        const originalGetApiKeyById = server.systemDal.getApiKeyById.bind(server.systemDal);
+        server.systemDal.getApiKeyById = (_id) => Promise.resolve(null);
+        return () => {
+          server.systemDal.getApiKeyById = originalGetApiKeyById;
+        };
+      },
+    },
+    {
+      name: 'invalid key secret',
       headers: {
         authorization: `Bearer sk_${knownRootKey.id}.wrong-secret`,
       },
-    });
+      setup: (server: Awaited<ReturnType<typeof buildServer>>) => {
+        const originalGetApiKeyById = server.systemDal.getApiKeyById.bind(server.systemDal);
+        server.systemDal.getApiKeyById = (_id) =>
+          Promise.resolve({
+            id: knownRootKey.id,
+            orgId: 'org_123',
+            keyType: 'root',
+            keyHash: knownRootKey.keyHash,
+            isRevoked: false,
+            createdAt: new Date('2026-03-01T00:00:00.000Z'),
+          });
+        return () => {
+          server.systemDal.getApiKeyById = originalGetApiKeyById;
+        };
+      },
+    },
+  ] as const;
 
-    assert.strictEqual(response.statusCode, 401);
-    const rawPayload: unknown = JSON.parse(response.payload);
-    const payload = errorResponseSchema.parse(rawPayload);
-    assert.strictEqual(payload.message, 'Unauthorized');
-  } finally {
-    server.systemDal.getApiKeyById = originalGetApiKeyById;
-    await server.close();
+  for (const testCase of cases) {
+    const server = await buildServer();
+    const restore = testCase.setup(server);
+
+    try {
+      const response = await server.inject({
+        method: 'POST',
+        url: '/orgs/org_123/api-keys',
+        ...(testCase.headers ? { headers: testCase.headers } : {}),
+      });
+
+      assert.strictEqual(response.statusCode, 401, testCase.name);
+      const rawPayload: unknown = JSON.parse(response.payload);
+      const payload = errorResponseSchema.parse(rawPayload);
+      assert.strictEqual(payload.message, 'Unauthorized', testCase.name);
+    } finally {
+      restore();
+      await server.close();
+    }
   }
 });
 
