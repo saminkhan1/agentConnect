@@ -199,32 +199,43 @@ Use two layers:
 
 ## Phase E — MCP + Outbound Webhooks (Weeks 7–8)
 
-**Goal:** Orchestrators can discover/call tools via MCP, and customers can subscribe to events from your control plane.
+**Goal:** Ship the official orchestrator integration paths without creating a second architecture: Hermes connects over standard MCP, OpenClaw consumes canonical events via its official hook surfaces, and we do not claim production readiness until those paths pass explicit conformance + reliability gates.
+
+### Phase E guardrails
+
+- Keep the lean MVP shape: one codebase, one image, API + Worker only. No orchestrator-specific sidecar service.
+- MCP stays a thin transport over existing Fastify routes/domain services. No duplicate business logic for tool calls.
+- Outbound webhook fanout stays async in the Worker and Postgres-backed queue path. API request paths remain fast-ACK.
+- Add only bounded compatibility needed by official docs: scoped MCP auth, outbound auth headers, and a small set of delivery modes. Do **not** build a general transformation/workflow engine in MVP.
+- Do not mark Hermes/OpenClaw support as “production ready” in README/docs until the suites below pass in CI and in a staging smoke run.
 
 ### Branch: `feat/phaseE/mcp-gateway`
 
-| Commit                                    | What                                                                                                                    |
-| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `feat: MCP server module (minimal tools)` | Tools: `agentinfra.email.send`, `agentinfra.payments.issue_card`, `agentinfra.events.list`, `agentinfra.timeline.list`. |
-| `feat: MCP auth via API key`              | `AGENTINFRA_API_KEY` resolves org + scopes; tool list reflects scopes.                                                  |
-| `feat: call_tool dispatch`                | Map tools → internal REST handlers/services (avoid duplicating logic).                                                  |
-| `docs: MCP integration guide`             | Claude Desktop/Cursor config examples; recommended scopes.                                                              |
-| `test: MCP list_tools + call_tool e2e`    | Ensure tool schemas stable + errors typed.                                                                              |
+| Commit                                         | What                                                                                                                                                                                                                                                                                                    |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `feat: MCP server module (thin facade)`        | Expose the existing bootstrap + scoped agent/resource/email/payment/event/timeline capabilities through MCP. Root-only tools (for example `agentinfra.payments.create_card_details_session`) stay hidden unless the session is authenticated with a root key.                                           |
+| `feat: MCP auth + transport boundaries`        | Support both stdio and HTTP `/mcp`; Bearer API key resolves org + scopes; `tools/list` reflects scope + key type; unauthenticated sessions expose bootstrap-only tools.                                                                                                                                 |
+| `feat: call_tool dispatch`                     | Map tools → internal REST handlers/services via Fastify inject so MCP cannot drift from the core API behavior.                                                                                                                                                                                          |
+| `docs: Hermes + generic MCP integration guide` | Hermes `mcp_servers` examples (`url`, `headers`, `timeout`, `connect_timeout`), Claude Desktop/Cursor examples, service-vs-root key guidance, and failure-mode notes.                                                                                                                                   |
+| `test: MCP protocol conformance e2e`           | Cover `initialize`, `tools/list`, `tools/call`, auth failures, CORS/HTTP transport, root-only tool hiding, and typed error envelopes.                                                                                                                                                                   |
+| `test: Hermes agent compatibility suite`       | Add `tests/hermes-mcp.integration.ts` to drive a Hermes-style remote MCP config against `/mcp`, verify reconnect after disconnect, prefixed tool discovery, and end-to-end `agents.create`, `resources.create`, `email.send`, `email.reply`, `events.list`, `timeline.list`, and `payments.issue_card`. |
 
-**PR → main:** “Phase E1: MCP gateway (thin)”
-**Tag:** `v0.5.0`
+**PR → main:** “Phase E1: MCP gateway + Hermes conformance”
 
 ### Branch: `feat/phaseE/outbound-webhooks`
 
-| Commit                                                 | What                                                                                                                                                                                                                      |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `migration: create webhook_subscriptions + deliveries` | `webhook_subscriptions(id, org_id, url, event_types[], signing_secret, status, created_at)` and `webhook_deliveries(id, subscription_id, event_id, attempt_count, last_status, next_attempt_at, created_at, updated_at)`. |
-| `feat: POST /webhook-subscriptions`                    | Create subscription + generate secret; validate URL allowlist (basic SSRF guard).                                                                                                                                         |
-| `feat: delivery worker (retries)`                      | Worker picks new events → fanout to subs → HMAC signature → 3 retries exponential backoff.                                                                                                                                |
-| `feat: GET /webhook-subscriptions/:id/deliveries`      | Debug recent failures/success.                                                                                                                                                                                            |
-| `test: outbound delivery + retry`                      | Fake endpoint, assert retries and final status.                                                                                                                                                                           |
+| Commit                                                       | What                                                                                                                                                                                                                                                                                                         |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `migration: create webhook_subscriptions + deliveries`       | `webhook_subscriptions(id, org_id, url, event_types[], delivery_mode, signing_secret, static_headers, status, created_at)` and `webhook_deliveries(id, subscription_id, event_id, attempt_count, last_status, next_attempt_at, created_at, updated_at)`. Add unique dedupe on `(subscription_id, event_id)`. |
+| `feat: POST /webhook-subscriptions`                          | Create subscription + generate secret; validate URL allowlist (basic SSRF guard); allow a bounded `delivery_mode` enum and allowlisted static outbound auth headers so AgentConnect can authenticate to official OpenClaw hook endpoints.                                                                    |
+| `feat: delivery worker (retries + bounded payload adapters)` | Worker picks new events → fanout to subs → HMAC signature for canonical payloads → apply delivery mode mapping → send auth headers → 3 retries with exponential backoff + jitter. Keep mappings intentionally small (`canonical_event` default, `openclaw_hook_agent`/`openclaw_hook_wake` only if needed).  |
+| `feat: GET /webhook-subscriptions/:id/deliveries`            | Debug recent failures/success with enough request/response metadata to triage auth and payload mismatches safely.                                                                                                                                                                                            |
+| `docs: OpenClaw webhook integration guide`                   | Document direct delivery to `POST /hooks/agent` / `POST /hooks/wake`, dedicated hook tokens, `allowedAgentIds`, `allowedSessionKeyPrefixes`, and when to keep `allowRequestSessionKey=false`.                                                                                                                |
+| `test: outbound delivery + retry`                            | Fake endpoint, assert retries, no duplicate fanout for the same `(subscription_id, event_id)`, and final status accounting.                                                                                                                                                                                  |
+| `test: OpenClaw hook compatibility suite`                    | Add `tests/openclaw-hooks.integration.ts` to verify AgentConnect can deliver to OpenClaw hooks with `Authorization: Bearer` or `x-openclaw-token`, expected body shape, correct retry handling for `401`/`429`/transient `5xx`, and no retries for stable `400` payload failures.                            |
 
-**PR → main:** “Phase E2: outbound webhooks (thin, reliable enough)”
+**PR → main:** “Phase E2: outbound webhooks + OpenClaw hook conformance”
+**Tag:** `v0.5.0` — orchestrator-ready MVP (`Hermes MCP` + `OpenClaw hooks`) verified on the lean architecture.
 
 ### Branch: `feat/phaseE/auth-hardening`
 
@@ -292,14 +303,14 @@ These remain in your original plan, but moved out of the critical path:
 
 ## Release Milestones (Lean)
 
-| Tag      | What's shippable                                                                        |
-| -------- | --------------------------------------------------------------------------------------- |
-| `v0.1.0` | Single deployable, orgs + API keys, agents                                              |
-| `v0.2.0` | Canonical event log + `GET /agents/:id/events`                                          |
-| `v0.3.0` | Email end-to-end (provision, send, ingest → events)                                     |
-| `v0.4.0` | Card issuance + card webhooks + derived unified timeline                                |
-| `v0.5.0` | MCP tools for email/card/events/timeline (+ optional outbound webhooks)                 |
-| `v0.5.1` | Auth hardening (key expiry, bounded auth, rate limiting, HMAC signing) + A2A Agent Card |
+| Tag      | What's shippable                                                                          |
+| -------- | ----------------------------------------------------------------------------------------- |
+| `v0.1.0` | Single deployable, orgs + API keys, agents                                                |
+| `v0.2.0` | Canonical event log + `GET /agents/:id/events`                                            |
+| `v0.3.0` | Email end-to-end (provision, send, ingest → events)                                       |
+| `v0.4.0` | Card issuance + card webhooks + derived unified timeline                                  |
+| `v0.5.0` | Validated Hermes MCP surface + OpenClaw hook delivery on the lean API/Worker architecture |
+| `v0.5.1` | Auth hardening (key expiry, bounded auth, rate limiting, HMAC signing) + A2A Agent Card   |
 
 ## Git Hygiene Reminders
 

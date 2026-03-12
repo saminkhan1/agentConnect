@@ -96,6 +96,10 @@ AgentConnect aims to be the neutral, multi-rail **"agent infrastructure"** layer
    ```
    This runs the free TryCloudflare flow for your current local `PORT` and prints a random public `trycloudflare.com` URL. See `docs/cloudflare-tunnel.md` for the full dev workflow.
 
+### Integration Guides
+
+- OpenClaw + Hermes production integration: `docs/openclaw-hermes-integration.md`
+
 ### Testing & Linting
 
 - **Run all verification checks (Lint + Types + Test - full pre-merge check):**
