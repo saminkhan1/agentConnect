@@ -66,7 +66,7 @@ export type OutboundEmailActionConfig<
 		reply: FastifyReply;
 		resource: ResourceRecord;
 		input: TInput;
-		adapter: NonNullable<FastifyRequest["server"]["agentMailAdapter"]>;
+		adapter: FastifyRequest["server"]["agentMailAdapter"];
 	}) =>
 		| PrepareInitialRequestDataResult<TRequestData>
 		| Promise<PrepareInitialRequestDataResult<TRequestData>>;
@@ -124,13 +124,6 @@ export async function executeOutboundEmailAction<
 		await enforceEmailSendLimit(orgId, org.planTier as PlanTier);
 	}
 
-	const adapter = request.server.agentMailAdapter;
-	if (!adapter) {
-		return reply
-			.code(500)
-			.send({ message: "AgentMail adapter not configured" });
-	}
-
 	const requestHash = config.buildRequestHash(emailResource, input);
 	const idempotencyKey = input.idempotency_key;
 
@@ -140,7 +133,7 @@ export async function executeOutboundEmailAction<
 			reply,
 			resource: emailResource,
 			input,
-			adapter,
+			adapter: request.server.agentMailAdapter,
 		});
 		if (prepared.kind === "response_sent") {
 			return reply;
@@ -152,6 +145,13 @@ export async function executeOutboundEmailAction<
 		);
 		if (policyError) {
 			return reply.code(403).send({ message: policyError });
+		}
+
+		const adapter = request.server.agentMailAdapter;
+		if (!adapter) {
+			return reply
+				.code(500)
+				.send({ message: "AgentMail adapter not configured" });
 		}
 
 		let actionResult: Record<string, unknown>;
@@ -240,7 +240,7 @@ export async function executeOutboundEmailAction<
 				reply,
 				resource: emailResource,
 				input,
-				adapter,
+				adapter: request.server.agentMailAdapter,
 			});
 			if (prepared.kind === "response_sent") {
 				return reply;
@@ -319,6 +319,13 @@ export async function executeOutboundEmailAction<
 			if (policyError) {
 				return reply.code(403).send({ message: policyError });
 			}
+		}
+
+		const adapter = request.server.agentMailAdapter;
+		if (!adapter) {
+			return reply
+				.code(500)
+				.send({ message: "AgentMail adapter not configured" });
 		}
 
 		const dispatchingAction = await dal.outboundActions.transitionState(

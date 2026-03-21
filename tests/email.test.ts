@@ -386,6 +386,7 @@ void test("POST /agents/:id/actions/send_email returns 403 when policy blocks re
 		findActiveByAgentIdAndType: (_agentId, _type, _provider) =>
 			Promise.resolve(resource),
 	});
+	const restoreAdapter = installAgentMailAdapterMock(server);
 
 	try {
 		const response = await server.inject({
@@ -407,6 +408,7 @@ void test("POST /agents/:id/actions/send_email returns 403 when policy blocks re
 		restore();
 		restoreAgents();
 		restoreResources();
+		restoreAdapter();
 		await server.close();
 	}
 });
@@ -3975,7 +3977,6 @@ void test("POST /agents/:id/actions/send_email returns 409 for a stale dispatchi
 	const agent = buildAgentRecord();
 	const resource = buildResourceRecord();
 
-	let performActionCalls = 0;
 	const staleTime = new Date(Date.now() - 10 * 60 * 1000); // 10 minutes ago
 
 	const requestHash = buildSendEmailRequestHash(resource, {
@@ -4007,15 +4008,7 @@ void test("POST /agents/:id/actions/send_email returns 409 for a stale dispatchi
 		outboundActions.methods,
 	);
 	const restoreAdvisoryLock = installAdvisoryLockMock(server);
-	const restoreAdapter = installAgentMailAdapterMock(server, {
-		performAction: () => {
-			performActionCalls += 1;
-			return Promise.resolve({
-				message_id: "msg_reclaimed",
-				thread_id: "thread_reclaimed",
-			});
-		},
-	});
+	const restoreAdapter = installAgentMailAdapterMock(server);
 
 	try {
 		const response = await server.inject({
@@ -4036,7 +4029,6 @@ void test("POST /agents/:id/actions/send_email returns 409 for a stale dispatchi
 			message:
 				"A previous email attempt may already have been dispatched for this idempotency key",
 		});
-		assert.strictEqual(performActionCalls, 0);
 	} finally {
 		restore();
 		restoreAgents();
@@ -4247,6 +4239,7 @@ void test("POST /agents/:id/actions/send_email returns 409 for a recent dispatch
 			),
 	});
 	const restoreAdvisoryLock = installAdvisoryLockMock(server);
+	const restoreAdapter = installAgentMailAdapterMock(server);
 
 	try {
 		const response = await server.inject({
@@ -4269,6 +4262,7 @@ void test("POST /agents/:id/actions/send_email returns 409 for a recent dispatch
 		restoreEvents();
 		restoreOutboundActions();
 		restoreAdvisoryLock();
+		restoreAdapter();
 		await server.close();
 	}
 });

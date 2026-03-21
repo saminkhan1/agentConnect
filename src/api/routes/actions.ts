@@ -455,7 +455,7 @@ function buildReplyEmailAdapterPayload(
 
 async function prepareReplyEmailRequestData(
 	reply: FastifyReply,
-	adapter: AgentMailAdapter,
+	adapter: AgentMailAdapter | undefined,
 	resource: ResourceRecord,
 	input: {
 		message_id: string;
@@ -466,6 +466,11 @@ async function prepareReplyEmailRequestData(
 		reply_to?: EmailAddressInput;
 	},
 ): Promise<PrepareInitialRequestDataResult<ReplyEmailActionRequestData>> {
+	if (!adapter) {
+		reply.code(500).send({ message: "AgentMail adapter not configured" });
+		return { kind: "response_sent" };
+	}
+
 	let originalMessage: Record<string, unknown>;
 	try {
 		originalMessage = await withTimeout(

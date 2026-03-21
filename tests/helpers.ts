@@ -288,7 +288,7 @@ export function installEventsDalMock(methods: {
 
 export function installAgentMailAdapterMock(
 	server: Awaited<ReturnType<typeof buildServer>>,
-	methods: Partial<AgentMailAdapter>,
+	methods?: Partial<AgentMailAdapter>,
 ) {
 	const original = server.agentMailAdapter;
 	server.agentMailAdapter = methods as AgentMailAdapter;
