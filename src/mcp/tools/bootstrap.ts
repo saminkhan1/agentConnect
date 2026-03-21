@@ -21,7 +21,7 @@ export function registerBootstrapTools(
 		"agentinfra.orgs.create",
 		{
 			description:
-				"Create a new organization and return a root API key. Use the returned key for all subsequent calls.",
+				"Create a new organization and receive a root API key. This is the first step — use the returned key to authenticate all subsequent tool calls.",
 			inputSchema: { name: z.string().min(1).describe("Organization name") },
 		},
 		async ({ name }) => {
@@ -52,10 +52,10 @@ export function registerBootstrapTools(
 			"agentinfra.api_keys.create_service",
 			{
 				description:
-					"Create a service API key for an organization. Requires root-key auth. " +
-					"If the MCP connection is already authenticated with a root key, omit the authorization field — " +
-					"it will be used automatically. Only pass authorization explicitly when the connection has no auth " +
-					"(e.g. immediately after orgs.create). Never store the key in conversation history.",
+					"Create a scoped service API key for day-to-day agent operations. Requires root-key auth. " +
+					"Omit the authorization field if the MCP connection already has a root key — " +
+					"pass it explicitly only when the connection has no auth (e.g. right after orgs.create). " +
+					"Never store the returned key in conversation history.",
 				inputSchema: {
 					org_id: z.string().min(1).describe("Organization ID"),
 					authorization: z

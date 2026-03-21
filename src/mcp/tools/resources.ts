@@ -17,7 +17,8 @@ export function registerResourceTools(
 	server.registerTool(
 		"agentinfra.resources.create",
 		{
-			description: "Provision a resource (email inbox or other) for an agent.",
+			description:
+				"Provision a new capability for an agent, such as an email inbox or other resource type. Each resource connects the agent to a real-world service.",
 			inputSchema: withOptionalAuthorizationSchema(session, {
 				agent_id: z.string().min(1).describe("Agent ID"),
 				type: z.string().min(1).describe('Resource type, e.g. "email_inbox"'),
@@ -46,7 +47,8 @@ export function registerResourceTools(
 	server.registerTool(
 		"agentinfra.resources.list",
 		{
-			description: "List all resources provisioned for an agent.",
+			description:
+				"List all active resources for an agent, including email inboxes, payment cards, and other provisioned capabilities.",
 			inputSchema: withOptionalAuthorizationSchema(session, {
 				agent_id: z.string().min(1).describe("Agent ID"),
 			}),
@@ -65,7 +67,8 @@ export function registerResourceTools(
 	server.registerTool(
 		"agentinfra.resources.delete",
 		{
-			description: "Deprovision and delete a resource.",
+			description:
+				"Deprovision a resource, removing the agent's access to the associated capability (e.g., email inbox or card).",
 			inputSchema: withOptionalAuthorizationSchema(session, {
 				agent_id: z.string().min(1).describe("Agent ID"),
 				resource_id: z.string().min(1).describe("Resource ID"),

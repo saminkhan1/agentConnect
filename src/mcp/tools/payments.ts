@@ -114,7 +114,7 @@ export function registerPaymentTools(
 		"agentinfra.payments.issue_card",
 		{
 			description:
-				"Issue a virtual Stripe card for an agent and return only safe metadata. Full card details require a separate card-details session.",
+				"Issue a virtual payment card for an agent with configurable spending limits and merchant restrictions. Returns safe metadata only — use create_card_details_session to access full card numbers.",
 			inputSchema: withOptionalAuthorizationSchema(session, {
 				agent_id: z.string().min(1).describe("Agent ID"),
 				cardholder_name: z
@@ -241,7 +241,7 @@ export function registerPaymentTools(
 			"agentinfra.payments.create_card_details_session",
 			{
 				description:
-					"Create a short-lived Stripe Issuing card-details session from a Stripe.js nonce. Root auth only.",
+					"Create a short-lived session to securely access full card details (PAN, CVC, expiry) via Stripe.js Issuing Elements. Requires root-key auth and a Stripe.js nonce.",
 				inputSchema: withOptionalAuthorizationSchema(session, {
 					agent_id: z.string().min(1).describe("Agent ID"),
 					resource_id: z.string().min(1).describe("Stripe card resource ID"),

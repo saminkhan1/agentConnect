@@ -128,9 +128,26 @@ function buildSpendingControls(
 		...(blocked_merchant_countries ? { blocked_merchant_countries } : {}),
 	};
 
-	return Object.keys(spendingControls).length > 0
-		? spendingControls
-		: undefined;
+	if (Object.keys(spendingControls).length > 0) {
+		return spendingControls;
+	}
+
+	// Safe defaults: $500/day, block cash advances & gambling
+	return {
+		spending_limits: [
+			{
+				amount: 50000, // $500 in cents
+				interval:
+					"daily" as Stripe.Issuing.CardCreateParams.SpendingControls.SpendingLimit.Interval,
+			},
+		],
+		blocked_categories: [
+			"automated_cash_disburse" as Stripe.Issuing.CardCreateParams.SpendingControls.BlockedCategory,
+			"manual_cash_disburse" as Stripe.Issuing.CardCreateParams.SpendingControls.BlockedCategory,
+			"gambling" as Stripe.Issuing.CardCreateParams.SpendingControls.BlockedCategory,
+			"lottery" as Stripe.Issuing.CardCreateParams.SpendingControls.BlockedCategory,
+		],
+	};
 }
 
 function buildAuthorizationEvent(

@@ -58,10 +58,19 @@ const orgRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
 				apiKey: {
 					id: result.apiKey.id,
 					orgId: result.apiKey.orgId,
-					keyType: "root",
+					keyType: "root" as const,
 					key: rootKey.plaintextKey,
 					createdAt: result.apiKey.createdAt.toISOString(),
 				},
+				...(server.billingService
+					? {
+							nextStep: {
+								action: "POST /billing/checkout",
+								message:
+									"Use your API key to call POST /billing/checkout with a plan_tier, success_url, and cancel_url to activate your subscription.",
+							},
+						}
+					: {}),
 			});
 		},
 	);

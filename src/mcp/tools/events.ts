@@ -17,7 +17,8 @@ export function registerEventTools(
 	server.registerTool(
 		"agentinfra.events.list",
 		{
-			description: "List events for an agent.",
+			description:
+				"List events for an agent across all capabilities — email activity, card transactions, and more. Filter by type or time range.",
 			inputSchema: withOptionalAuthorizationSchema(session, {
 				agent_id: z.string().min(1).describe("Agent ID"),
 				type: z.string().optional().describe("Filter by event type"),
@@ -49,7 +50,7 @@ export function registerEventTools(
 		"agentinfra.timeline.list",
 		{
 			description:
-				"Get the timeline of activities for an agent (grouped events).",
+				"View an agent's activity timeline with events grouped into threads and transaction clusters. Provides a unified view across email and payment activity.",
 			inputSchema: withOptionalAuthorizationSchema(session, {
 				agent_id: z.string().min(1).describe("Agent ID"),
 				since: z.string().optional().describe("ISO 8601 start time"),

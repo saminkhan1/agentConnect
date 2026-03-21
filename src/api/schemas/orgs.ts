@@ -27,6 +27,12 @@ export const createOrgResponseSchema = z.object({
 	apiKey: apiKeyResponseSchema.extend({
 		keyType: z.literal("root"),
 	}),
+	nextStep: z
+		.object({
+			action: z.string(),
+			message: z.string(),
+		})
+		.optional(),
 });
 
 export const createServiceApiKeyResponseSchema = z.object({

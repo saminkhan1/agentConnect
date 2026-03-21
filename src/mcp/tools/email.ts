@@ -19,7 +19,8 @@ export function registerEmailTools(
 	server.registerTool(
 		"agentinfra.email.send",
 		{
-			description: "Send an email from an agent's inbox.",
+			description:
+				"Send an email from an agent's provisioned inbox. The agent must have an active email_inbox resource.",
 			inputSchema: withOptionalAuthorizationSchema(session, {
 				agent_id: z.string().min(1).describe("Agent ID"),
 				to: z.array(z.email()).min(1).describe("Recipient email addresses"),
@@ -70,7 +71,8 @@ export function registerEmailTools(
 	server.registerTool(
 		"agentinfra.email.reply",
 		{
-			description: "Reply to an email message.",
+			description:
+				"Reply to a received email, preserving the original thread. Use the message_id from an email.received event.",
 			inputSchema: withOptionalAuthorizationSchema(session, {
 				agent_id: z.string().min(1).describe("Agent ID"),
 				message_id: z.string().min(1).describe("ID of the message to reply to"),
@@ -119,7 +121,8 @@ export function registerEmailTools(
 	server.registerTool(
 		"agentinfra.email.get_message",
 		{
-			description: "Fetch the full content of an email message.",
+			description:
+				"Retrieve the full content of an email message, including subject, body, headers, and attachments.",
 			inputSchema: withOptionalAuthorizationSchema(session, {
 				agent_id: z.string().min(1).describe("Agent ID"),
 				message_id: z.string().min(1).describe("Message ID"),

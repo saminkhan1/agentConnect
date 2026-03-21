@@ -17,7 +17,8 @@ export function registerAgentTools(
 	server.registerTool(
 		"agentinfra.agents.create",
 		{
-			description: "Create a new agent.",
+			description:
+				"Create a new agent that can be assigned email inboxes, payment cards, and other capabilities.",
 			inputSchema: withOptionalAuthorizationSchema(session, {
 				name: z.string().min(1).describe("Agent name"),
 			}),
@@ -40,7 +41,8 @@ export function registerAgentTools(
 	server.registerTool(
 		"agentinfra.agents.list",
 		{
-			description: "List all agents in the organization.",
+			description:
+				"List all agents in your organization, including their assigned resources and status.",
 			inputSchema: withOptionalAuthorizationSchema(session, {
 				include_archived: z
 					.boolean()
@@ -65,7 +67,8 @@ export function registerAgentTools(
 	server.registerTool(
 		"agentinfra.agents.get",
 		{
-			description: "Get a single agent by ID.",
+			description:
+				"Retrieve details for a specific agent, including its name and current status.",
 			inputSchema: withOptionalAuthorizationSchema(session, {
 				agent_id: z.string().min(1).describe("Agent ID"),
 			}),
@@ -84,7 +87,7 @@ export function registerAgentTools(
 	server.registerTool(
 		"agentinfra.agents.update",
 		{
-			description: "Update an agent (rename or change archived status).",
+			description: "Update an agent's name or archived status.",
 			inputSchema: withOptionalAuthorizationSchema(session, {
 				agent_id: z.string().min(1).describe("Agent ID"),
 				name: z.string().min(1).optional().describe("New name"),
@@ -112,7 +115,8 @@ export function registerAgentTools(
 	server.registerTool(
 		"agentinfra.agents.archive",
 		{
-			description: "Archive (soft-delete) an agent.",
+			description:
+				"Archive an agent, removing it from active use while preserving its event history.",
 			inputSchema: withOptionalAuthorizationSchema(session, {
 				agent_id: z.string().min(1).describe("Agent ID"),
 			}),
