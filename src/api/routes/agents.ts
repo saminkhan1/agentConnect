@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 
 import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
 import type { agents as agentsTable } from "../../db/schema";
+import type { PlanTier } from "../../domain/billing";
+import { enforceAgentLimit } from "../../domain/billing-limits";
 import { requireScope } from "../../plugins/auth";
 import {
 	agentIdParamsSchema,
@@ -44,6 +46,14 @@ const agentsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
 				return reply.code(401).send({
 					message: "Unauthorized",
 				});
+			}
+
+			const org = await server.systemDal.getOrg(request.auth.org_id);
+			if (
+				org?.subscriptionStatus === "active" ||
+				org?.subscriptionStatus === "trialing"
+			) {
+				await enforceAgentLimit(request.auth.org_id, org.planTier as PlanTier);
 			}
 
 			const createdAgent = await request

@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
+import { getServerConfig } from "../../config";
 import { generateApiKeyMaterial } from "../../domain/api-keys";
 import { requireScope } from "../../plugins/auth";
 import { errorResponseSchema } from "../schemas/common";
@@ -12,6 +13,8 @@ import {
 } from "../schemas/orgs";
 
 const orgRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
+	const config = getServerConfig(process.env);
+
 	server.post(
 		"/orgs",
 		{
@@ -19,10 +22,18 @@ const orgRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
 				body: createOrgBodySchema,
 				response: {
 					201: createOrgResponseSchema,
+					403: errorResponseSchema,
 				},
 			},
 		},
 		async (request, reply) => {
+			if (config.SIGNUP_SECRET) {
+				const provided = request.headers["x-signup-secret"];
+				if (provided !== config.SIGNUP_SECRET) {
+					return reply.code(403).send({ message: "Invalid signup secret" });
+				}
+			}
+
 			const orgId = `org_${crypto.randomUUID()}`;
 			const rootKey = await generateApiKeyMaterial();
 

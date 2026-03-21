@@ -12,6 +12,8 @@ import type {
 	events as eventsTable,
 	resources as resourcesTable,
 } from "../../db/schema";
+import type { PlanTier } from "../../domain/billing";
+import { enforceCardLimit } from "../../domain/billing-limits";
 import { AppError } from "../../domain/errors";
 import { EVENT_TYPES } from "../../domain/events";
 import { requireKeyType, requireScope } from "../../plugins/auth";
@@ -687,6 +689,14 @@ const actionsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
 			const agent = await dal.agents.findById(agentId);
 			if (!agent || agent.isArchived) {
 				return reply.code(404).send({ message: "Agent not found" });
+			}
+
+			const org = await server.systemDal.getOrg(orgId);
+			if (
+				org?.subscriptionStatus === "active" ||
+				org?.subscriptionStatus === "trialing"
+			) {
+				await enforceCardLimit(orgId, org.planTier as PlanTier);
 			}
 
 			const {

@@ -1,5 +1,7 @@
 import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
 import type { resources as resourcesTable } from "../../db/schema";
+import type { PlanTier } from "../../domain/billing";
+import { enforceInboxLimit } from "../../domain/billing-limits";
 import { AppError } from "../../domain/errors";
 import { requireScope } from "../../plugins/auth";
 import { errorResponseSchema } from "../schemas/common";
@@ -62,6 +64,19 @@ const resourceRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
 					message:
 						"Stripe cards must be issued via POST /agents/:id/actions/issue_card",
 				});
+			}
+
+			if (request.body.type === "email_inbox") {
+				const org = await server.systemDal.getOrg(request.auth.org_id);
+				if (
+					org?.subscriptionStatus === "active" ||
+					org?.subscriptionStatus === "trialing"
+				) {
+					await enforceInboxLimit(
+						request.auth.org_id,
+						org.planTier as PlanTier,
+					);
+				}
 			}
 
 			try {

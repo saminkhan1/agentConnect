@@ -9,6 +9,7 @@ import {
 import { getServerConfig } from "../config";
 import { AppError } from "../domain/errors";
 import authPlugin from "../plugins/auth";
+import billingServicesPlugin from "../plugins/billing-services";
 import dbPlugin from "../plugins/db";
 import eventServicesPlugin from "../plugins/event-services";
 import outboundWebhookServicesPlugin from "../plugins/outbound-webhook-services";
@@ -16,6 +17,7 @@ import resourceServicesPlugin from "../plugins/resource-services";
 import webhookServicesPlugin from "../plugins/webhook-services";
 import actionsRoutes from "./routes/actions";
 import agentsRoutes from "./routes/agents";
+import billingRoutes from "./routes/billing";
 import eventsRoutes from "./routes/events";
 import healthRoutes from "./routes/health";
 import mcpRoutes from "./routes/mcp";
@@ -71,10 +73,39 @@ export async function buildServer() {
 
 	await server.register(dbPlugin);
 	await server.register(authPlugin);
+	await server.register(billingServicesPlugin);
 	await server.register(outboundWebhookServicesPlugin);
 	await server.register(eventServicesPlugin);
 	await server.register(resourceServicesPlugin);
 	await server.register(webhookServicesPlugin);
+
+	// Subscription enforcement — only active when billing is configured (SIGNUP_SECRET set).
+	// Exempt routes: health, webhooks, org creation, billing, MCP.
+	if (config.SIGNUP_SECRET) {
+		const SUBSCRIPTION_EXEMPT_PREFIXES = [
+			"/health",
+			"/webhooks/",
+			"/orgs",
+			"/billing/",
+			"/mcp",
+		];
+		const ACTIVE_STATUSES = new Set(["active", "trialing"]);
+
+		server.addHook("onRequest", async (request, reply) => {
+			if (!request.auth) return;
+
+			const url = request.url.split("?")[0];
+			if (SUBSCRIPTION_EXEMPT_PREFIXES.some((p) => url.startsWith(p))) return;
+
+			const org = await server.systemDal.getOrg(request.auth.org_id);
+			if (org && !ACTIVE_STATUSES.has(org.subscriptionStatus)) {
+				return reply.code(402).send({
+					message:
+						"Active subscription required. Visit /billing/checkout to subscribe.",
+				});
+			}
+		});
+	}
 
 	server.addHook("onSend", async (request, reply, _payload) => {
 		reply.header("x-correlation-id", request.id);
@@ -100,6 +131,7 @@ export async function buildServer() {
 	await server.register(timelineRoutes);
 	await server.register(resourceRoutes);
 	await server.register(actionsRoutes);
+	await server.register(billingRoutes);
 	await server.register(messagesRoutes);
 
 	if (config.MCP_HTTP_ENABLED) {

@@ -119,6 +119,11 @@ void test("POST /orgs creates an org and returns a root key once", async () => {
 			org: {
 				id: parsedInput.org.id,
 				name: parsedInput.org.name,
+				planTier: "starter" as const,
+				stripeCustomerId: null,
+				stripeSubscriptionId: null,
+				subscriptionStatus: "incomplete" as const,
+				currentPeriodEnd: null,
 				createdAt,
 			},
 			apiKey: {
@@ -291,6 +296,11 @@ void test("POST /orgs/:id/api-keys creates a service key for a matching root key
 		return Promise.resolve({
 			id,
 			name: "Acme AI",
+			planTier: "starter" as const,
+			stripeCustomerId: null,
+			stripeSubscriptionId: null,
+			subscriptionStatus: "incomplete" as const,
+			currentPeriodEnd: null,
 			createdAt: new Date("2026-03-01T00:00:00.000Z"),
 		});
 	};
@@ -380,6 +390,11 @@ void test("POST /orgs/:id/api-keys returns 403 when auth org does not match rout
 		return Promise.resolve({
 			id,
 			name: "Acme AI",
+			planTier: "starter" as const,
+			stripeCustomerId: null,
+			stripeSubscriptionId: null,
+			subscriptionStatus: "incomplete" as const,
+			currentPeriodEnd: null,
 			createdAt: new Date("2026-03-01T00:00:00.000Z"),
 		});
 	};

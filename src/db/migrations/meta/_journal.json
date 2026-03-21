@@ -36,6 +36,13 @@
 			"when": 1773341982276,
 			"tag": "0004_adorable_the_anarchist",
 			"breakpoints": true
+		},
+		{
+			"idx": 5,
+			"version": "7",
+			"when": 1774067467235,
+			"tag": "0005_equal_zuras",
+			"breakpoints": true
 		}
 	]
 }

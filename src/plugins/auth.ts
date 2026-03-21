@@ -12,6 +12,7 @@ import {
 	parseApiKeyFromAuthorizationHeader,
 	verifyApiKeySecret,
 } from "../domain/api-keys";
+import type { SubscriptionStatus } from "../domain/billing";
 
 export type AuthContext = {
 	org_id: string;
@@ -85,6 +86,36 @@ export function requireScope(...requiredScopes: ApiScope[]) {
 		);
 		if (!hasRequiredScopes) {
 			return reply.code(403).send({ message: "Forbidden" });
+		}
+	};
+}
+
+const ACTIVE_SUBSCRIPTION_STATUSES: Set<SubscriptionStatus> = new Set([
+	"active",
+	"trialing",
+]);
+
+export function requireActiveSubscription() {
+	return async (request: FastifyRequest, reply: FastifyReply) => {
+		const auth = request.auth;
+		if (!auth) {
+			return reply.code(401).send({ message: "Unauthorized" });
+		}
+
+		const org = await request.server.systemDal.getOrg(auth.org_id);
+		if (!org) {
+			return reply.code(401).send({ message: "Unauthorized" });
+		}
+
+		if (
+			!ACTIVE_SUBSCRIPTION_STATUSES.has(
+				org.subscriptionStatus as SubscriptionStatus,
+			)
+		) {
+			return reply.code(402).send({
+				message:
+					"Active subscription required. Visit /billing/checkout to subscribe.",
+			});
 		}
 	};
 }

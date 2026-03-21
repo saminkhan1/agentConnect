@@ -57,6 +57,38 @@ const webhookRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
 		return reply.code(200).send({ ok: true });
 	});
 
+	server.post("/webhooks/stripe-billing", {}, async (request, reply) => {
+		const rawBody = request.body as Buffer;
+		const billing = server.billingService;
+		if (!billing) {
+			return reply.code(500).send({ message: "Billing not configured" });
+		}
+
+		const signature = request.headers["stripe-signature"];
+		if (!signature || typeof signature !== "string") {
+			return reply
+				.code(401)
+				.send({ message: "Missing stripe-signature header" });
+		}
+
+		const webhookSecret = server.billingWebhookSecret;
+		if (!webhookSecret) {
+			return reply
+				.code(500)
+				.send({ message: "Billing webhook secret not configured" });
+		}
+
+		try {
+			const event = billing.constructEvent(rawBody, signature, webhookSecret);
+			await billing.syncSubscription(event);
+		} catch (err) {
+			request.log.error({ err }, "Stripe billing webhook error");
+			return reply.code(400).send({ message: "Webhook verification failed" });
+		}
+
+		return reply.code(200).send({ ok: true });
+	});
+
 	server.post("/webhooks/stripe", {}, async (request, reply) => {
 		const rawBody = request.body as Buffer;
 		const headers = normalizeWebhookHeaders(request.headers);

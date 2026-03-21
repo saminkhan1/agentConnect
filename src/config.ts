@@ -59,6 +59,11 @@ const serverEnvSchema = z.object({
 		.max(60_000)
 		.optional()
 		.default(1_000),
+	SIGNUP_SECRET: z.string().trim().min(1).optional(),
+	STRIPE_BILLING_WEBHOOK_SECRET: z.string().trim().min(1).optional(),
+	STRIPE_PRICE_ID_STARTER: z.string().trim().min(1).optional(),
+	STRIPE_PRICE_ID_PERSONAL: z.string().trim().min(1).optional(),
+	STRIPE_PRICE_ID_POWER: z.string().trim().min(1).optional(),
 });
 
 const dbEnvSchema = z.object({

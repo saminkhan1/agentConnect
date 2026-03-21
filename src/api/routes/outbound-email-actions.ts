@@ -9,6 +9,8 @@ import type {
 	outboundActions as outboundActionsTable,
 	resources as resourcesTable,
 } from "../../db/schema";
+import type { PlanTier } from "../../domain/billing";
+import { enforceEmailSendLimit } from "../../domain/billing-limits";
 import { EVENT_TYPES } from "../../domain/events";
 import {
 	isOutboundActionConflict,
@@ -112,6 +114,14 @@ export async function executeOutboundEmailAction<
 		return reply
 			.code(404)
 			.send({ message: "No active agentmail email inbox found for agent" });
+	}
+
+	const org = await request.server.systemDal.getOrg(orgId);
+	if (
+		org?.subscriptionStatus === "active" ||
+		org?.subscriptionStatus === "trialing"
+	) {
+		await enforceEmailSendLimit(orgId, org.planTier as PlanTier);
 	}
 
 	const adapter = request.server.agentMailAdapter;

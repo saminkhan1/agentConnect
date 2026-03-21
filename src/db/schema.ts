@@ -55,9 +55,30 @@ export const webhookDeliveryStatusEnum = pgEnum("webhook_delivery_status", [
 	"failed",
 ]);
 
+export const planTierEnum = pgEnum("plan_tier", [
+	"starter",
+	"personal",
+	"power",
+]);
+export const subscriptionStatusEnum = pgEnum("subscription_status", [
+	"incomplete",
+	"active",
+	"trialing",
+	"past_due",
+	"canceled",
+	"unpaid",
+]);
+
 export const orgs = pgTable("orgs", {
 	id: varchar("id", { length: 255 }).primaryKey(),
 	name: text("name").notNull(),
+	planTier: planTierEnum("plan_tier").notNull().default("starter"),
+	stripeCustomerId: text("stripe_customer_id"),
+	stripeSubscriptionId: text("stripe_subscription_id"),
+	subscriptionStatus: subscriptionStatusEnum("subscription_status")
+		.notNull()
+		.default("incomplete"),
+	currentPeriodEnd: timestamp("current_period_end", { withTimezone: true }),
 	createdAt: timestamp("created_at", { withTimezone: true })
 		.defaultNow()
 		.notNull(),

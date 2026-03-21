@@ -625,7 +625,16 @@ void test("agentinfra.orgs.create returns root_key in structuredContent", async 
 	);
 	server.systemDal.createOrgWithApiKey = () =>
 		Promise.resolve({
-			org: { id: fakeOrg.id, name: fakeOrg.name, createdAt: FIXED_TIMESTAMP },
+			org: {
+				id: fakeOrg.id,
+				name: fakeOrg.name,
+				planTier: "starter" as const,
+				stripeCustomerId: null,
+				stripeSubscriptionId: null,
+				subscriptionStatus: "incomplete" as const,
+				currentPeriodEnd: null,
+				createdAt: FIXED_TIMESTAMP,
+			},
 			apiKey: {
 				id: fakeApiKey.id,
 				orgId: fakeOrg.id,
