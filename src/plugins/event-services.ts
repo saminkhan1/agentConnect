@@ -1,27 +1,30 @@
-import type { FastifyPluginCallback } from 'fastify';
-import fp from 'fastify-plugin';
+import type { FastifyPluginCallback } from "fastify";
+import fp from "fastify-plugin";
 
-import { EventWriter } from '../domain/event-writer';
+import { EventWriter } from "../domain/event-writer";
 
-declare module 'fastify' {
-  interface FastifyInstance {
-    eventWriter: EventWriter;
-  }
+declare module "fastify" {
+	interface FastifyInstance {
+		eventWriter: EventWriter;
+	}
 }
 
 const eventServicesPlugin: FastifyPluginCallback = (server, _opts, done) => {
-  const eventWriter = new EventWriter({
-    onEventCreated: async (dbExecutor, event) => {
-      await server.outboundWebhookService.enqueueDeliveriesForEvent(dbExecutor, event);
-    },
-  });
+	const eventWriter = new EventWriter({
+		onEventCreated: async (dbExecutor, event) => {
+			await server.outboundWebhookService.enqueueDeliveriesForEvent(
+				dbExecutor,
+				event,
+			);
+		},
+	});
 
-  server.decorate('eventWriter', eventWriter);
+	server.decorate("eventWriter", eventWriter);
 
-  done();
+	done();
 };
 
 export default fp(eventServicesPlugin, {
-  name: 'event-services',
-  dependencies: ['db', 'outbound-webhook-services'],
+	name: "event-services",
+	dependencies: ["db", "outbound-webhook-services"],
 });

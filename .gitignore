@@ -6,3 +6,4 @@ CLAUDE.md
 AGENTS.md
 GEMINI.md
 .demo-state
+*.tsbuildinfo

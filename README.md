@@ -99,16 +99,13 @@ AgentConnect aims to be the neutral, multi-rail **"agent infrastructure"** layer
 ### Integration Guides
 
 - OpenClaw + Hermes production integration: `docs/openclaw-hermes-integration.md`
+- Paperclip (non-dev work): `paperclip/README.md`
 
 ### Testing & Linting
 
-- **Run all verification checks (Lint + Types + Test - full pre-merge check):**
+- **Run all verification checks (Lint + Format + Types + Test):**
   ```bash
   pnpm run verify
-  ```
-- **Run lint only:**
-  ```bash
-  pnpm run lint
   ```
 - **Run typecheck only:**
   ```bash
@@ -122,9 +119,9 @@ AgentConnect aims to be the neutral, multi-rail **"agent infrastructure"** layer
   ```bash
   pnpm run test:integration # Runs drizzle-kit migrate, then tests/*.integration.ts
   ```
-- **Auto-fix linting issues:**
+- **Auto-fix formatting & linting issues:**
   ```bash
-  pnpm run fix              # lint:fix + format
+  pnpm run fix              # Powered by Biome
   ```
 
 ---

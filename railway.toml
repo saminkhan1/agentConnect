@@ -1,0 +1,35 @@
+# Railway config — AgentConnect
+#
+# Setup:
+#   1. railway.com → New Project → Deploy from GitHub repo
+#   2. Set environment variables (see list below) in the Railway dashboard
+#   3. Add a second service for the worker (same repo, override startCommand)
+#
+# Database: Neon (free) — neon.tech
+#   Create a project, copy the connection string, set as DATABASE_URL
+#
+# Required env vars (set in Railway dashboard → Variables):
+#   DATABASE_URL              — from Neon (postgres://...?sslmode=require)
+#   AGENTMAIL_API_KEY
+#   AGENTMAIL_WEBHOOK_SECRET
+#   STRIPE_SECRET_KEY
+#   STRIPE_WEBHOOK_SECRET
+#   MCP_HTTP_ENABLED          — set to "true" to enable MCP HTTP transport
+#   MCP_ALLOWED_ORIGINS       — comma-separated allowed origins for MCP
+#   OUTBOUND_WEBHOOK_ALLOWED_HOSTS  — comma-separated allowed hosts for outbound webhooks
+#
+# Worker service (add manually in Railway dashboard):
+#   - New Service → same GitHub repo
+#   - Override startCommand: node dist/worker/outbound-webhooks.js
+#   - Share the same DATABASE_URL variable
+
+[build]
+builder = "DOCKERFILE"
+
+[deploy]
+# Runs DB migrations then starts the API server
+startCommand = "pnpm run db:migrate && node dist/api/server.js"
+healthcheckPath = "/health"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
