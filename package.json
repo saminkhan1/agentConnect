@@ -13,7 +13,7 @@
 		"test": "tsx --test tests/*.test.ts",
 		"test:integration": "drizzle-kit migrate && tsx --test tests/*.integration.ts",
 		"test:stripe-live": "drizzle-kit migrate && tsx --test tests/stripe-live.integration.ts",
-		"verify": "biome check . && pnpm run typecheck && pnpm run test && pnpm run test:integration",
+		"verify": "biome check . && pnpm run typecheck && pnpm run db:migrate && pnpm run test && pnpm run test:integration",
 		"fix": "biome check --write .",
 		"prepare": "node scripts/setup-git-hooks.cjs",
 		"db:push": "drizzle-kit push --force",
