@@ -59,6 +59,7 @@ AgentConnect requirements:
 - Keep the endpoint on TLS and private ingress or strict edge auth.
 - Use a service key by default.
 - Use a root key only for root-only MCP operations such as `agentinfra.payments.create_card_details_session`.
+- Payment MCP tools appear only when the Stripe adapter is configured.
 
 ### Supported tool classes
 
@@ -68,7 +69,7 @@ The MCP surface should stay aligned with existing routes, not invent new semanti
 - Agents: create, list, get, update, archive
 - Resources: create, list, delete
 - Email: send, reply, get message
-- Payments: issue card, create card details session (root only)
+- Payments: issue card, create card details session (root only), when Stripe is configured
 - Observability: list events, list timeline
 
 ### Hermes conformance gate
@@ -123,6 +124,14 @@ Current REST calls from OpenClaw workflows map cleanly to AgentConnect:
 - Email actions: `POST /agents/:id/actions/send_email`, `POST /agents/:id/actions/reply_email`
 - Card issuance: `POST /agents/:id/actions/issue_card`
 - Observability: `GET /agents/:id/events`, `GET /agents/:id/timeline`
+- Key lifecycle: `POST /orgs/:id/api-keys`, `POST /orgs/:id/api-keys/rotate-root`, `POST /orgs/:id/api-keys/:keyId/revoke`
+- Billing: `POST /billing/checkout`, `POST /billing/portal`
+
+Operational notes for workflow authors:
+
+- Email send and reply routes require a non-empty `idempotency_key`. Reuse the same key when retrying the same action.
+- Billing and API key lifecycle routes are root-key only.
+- Payment routes and MCP payment tools are unavailable when Stripe is not configured.
 
 Direct AgentConnect -> OpenClaw delivery is exposed as root-key managed outbound subscriptions:
 
@@ -139,6 +148,7 @@ Implemented delivery behavior:
 - Mapped hooks such as `POST /hooks/<name>` remain unsupported
 - Deliveries are deduped on `(subscription_id, event_id)`
 - Worker retries transient `401`, `429`, network, and `5xx` failures with exponential backoff plus jitter, and honors `Retry-After` on `429` when present
+- Delivery-time DNS revalidation fails closed for local/private targets and retries transient DNS resolution failures before marking the attempt failed
 - Stable `400` payload failures are recorded and not retried forever
 - Every delivery carries `x-agentconnect-*` metadata headers plus an HMAC signature over `${timestamp}.${body}`
 
@@ -179,7 +189,7 @@ Phase E is not done until `tests/openclaw-hooks.integration.ts` proves all of th
 2. `openclaw_hook_agent` delivery mode produces the expected hook body shape from a canonical event.
 3. `openclaw_hook_wake` delivery mode does the same when wake-only semantics are desired.
 4. Deliveries are deduped on repeated worker replays for the same `(subscription_id, event_id)`.
-5. Retries occur for transient `401`, `429`, and `5xx` responses according to the worker backoff policy, and `429` honors `Retry-After` when present.
+5. Retries occur for transient `401`, `429`, `5xx`, and transient DNS resolution failures according to the worker backoff policy, and `429` honors `Retry-After` when present.
 6. Stable `400` payload failures are recorded and not retried forever.
 7. Subscription docs and examples default to private ingress, dedicated hook tokens, `allowedAgentIds`, and restricted `allowedSessionKeyPrefixes`.
 

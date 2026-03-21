@@ -1,6 +1,7 @@
 import type {
 	DeprovisionResult,
 	ParsedWebhookEvent,
+	ProviderActionOptions,
 	ProviderAdapter,
 	ProvisionResult,
 	Resource,
@@ -37,6 +38,7 @@ export class MockAdapter implements ProviderAdapter {
 		_resource: Resource,
 		_action: string,
 		_payload: Record<string, unknown>,
+		_options?: ProviderActionOptions,
 	): Promise<Record<string, unknown>> {
 		await Promise.resolve();
 		return {};

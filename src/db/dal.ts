@@ -229,9 +229,10 @@ export class ApiKeyDal {
 		return result[0];
 	}
 
-	async deleteById(id: string) {
+	async revokeById(id: string) {
 		const result = await db
-			.delete(apiKeys)
+			.update(apiKeys)
+			.set({ isRevoked: true })
 			.where(and(eq(apiKeys.orgId, this.orgId), eq(apiKeys.id, id)))
 			.returning();
 		return result[0] || null;

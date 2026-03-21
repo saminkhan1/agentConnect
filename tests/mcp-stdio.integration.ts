@@ -19,6 +19,10 @@ type ToolTextResult = {
 	content: Array<{ type: string; text: string }>;
 };
 
+const hasStripeAdapterConfig = Boolean(
+	process.env.STRIPE_SECRET_KEY && process.env.STRIPE_WEBHOOK_SECRET,
+);
+
 async function cleanupOrg(orgId: string): Promise<void> {
 	await db.delete(outboundActions).where(eq(outboundActions.orgId, orgId));
 	await db.delete(events).where(eq(events.orgId, orgId));
@@ -77,9 +81,12 @@ void test("integration: stdio MCP entrypoint authenticates with AGENTINFRA_API_K
 		const tools = await client.listTools();
 		const toolNames = tools.tools.map((tool) => tool.name);
 		assert.ok(toolNames.includes("agentinfra.agents.create"));
-		assert.ok(
-			toolNames.includes("agentinfra.payments.create_card_details_session"),
-		);
+		// Payment tools are conditionally registered only when Stripe is fully configured.
+		if (hasStripeAdapterConfig) {
+			assert.ok(
+				toolNames.includes("agentinfra.payments.create_card_details_session"),
+			);
+		}
 
 		const createAgentResult = (await client.callTool({
 			name: "agentinfra.agents.create",

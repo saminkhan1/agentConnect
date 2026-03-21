@@ -383,6 +383,151 @@ void test("integration: outbound webhooks reject hostnames that resolve to priva
 	}
 });
 
+void test("integration: outbound webhooks retry transient DNS revalidation failures before succeeding", {
+	concurrency: false,
+}, async () => {
+	const restoreEnv = setEnv({ NODE_ENV: "test" });
+	const server = await buildServer();
+	const orgId = `org_openclaw_dns_retry_${crypto.randomUUID()}`;
+	const agentId = `agt_openclaw_dns_retry_${crypto.randomUUID()}`;
+	const fixedNow = new Date("2026-03-12T12:07:00.000Z");
+	let resolveAttempts = 0;
+	const originalFetch = globalThis.fetch;
+	let deliveredRequest: {
+		url: string;
+		method: string;
+		headers: Headers;
+		body: string;
+	} | null = null;
+
+	try {
+		const authorization = await createOrgWithRootKey(server, orgId);
+		await createAgent(orgId, agentId);
+
+		server.outboundWebhookService = new OutboundWebhookService({
+			allowlistedHosts: [],
+			nodeEnv: "production",
+			resolveHostname: () =>
+				Promise.resolve([{ address: "203.0.113.10", family: 4 }]),
+		});
+		server.outboundWebhookWorker = new OutboundWebhookWorker({
+			now: () => fixedNow,
+			random: () => 0,
+			nodeEnv: "production",
+			resolveHostname: () => {
+				resolveAttempts += 1;
+				if (resolveAttempts === 1) {
+					return Promise.reject(new Error("temporary DNS failure"));
+				}
+
+				return Promise.resolve([{ address: "203.0.113.10", family: 4 }]);
+			},
+		});
+		globalThis.fetch = (async (input, init) => {
+			const request = new Request(input, init);
+			deliveredRequest = {
+				url: request.url,
+				method: request.method,
+				headers: request.headers,
+				body: await request.text(),
+			};
+
+			return new Response(JSON.stringify({ ok: true }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		}) as typeof fetch;
+
+		const createSubscriptionResponse = await server.inject({
+			method: "POST",
+			url: "/webhook-subscriptions",
+			headers: {
+				authorization,
+			},
+			payload: {
+				url: "https://hooks.example.com/oc/hooks/agent",
+				event_types: ["email.delivered"],
+				delivery_mode: "openclaw_hook_agent",
+				static_headers: {
+					Authorization: "Bearer oc_dns_retry_token",
+				},
+				delivery_config: {},
+			},
+		});
+
+		assert.strictEqual(createSubscriptionResponse.statusCode, 201);
+		const createSubscriptionPayload: {
+			subscription: { id: string };
+		} = createSubscriptionResponse.json();
+
+		await server.eventWriter.writeEvent({
+			orgId,
+			agentId,
+			provider: "agentmail",
+			providerEventId: `evt_${crypto.randomUUID()}`,
+			eventType: "email.delivered",
+			occurredAt: "2026-03-12T12:07:00.000Z",
+			data: {
+				message_id: "msg_dns_retry_1",
+				thread_id: "thread_dns_retry_1",
+			},
+		});
+
+		await forceDeliveryDue(createSubscriptionPayload.subscription.id, {
+			nextAttemptAt: new Date(fixedNow.getTime() - 1_000),
+			updatedAt: fixedNow,
+		});
+		assert.strictEqual(await server.outboundWebhookWorker.drainOnce(), 1);
+
+		const retryDelivery = await getDeliveryRow(
+			createSubscriptionPayload.subscription.id,
+		);
+		assert.ok(retryDelivery, "expected delivery row after DNS failure");
+		assert.strictEqual(retryDelivery.lastStatus, "retry_scheduled");
+		assert.strictEqual(retryDelivery.attemptCount, 1);
+		assert.deepStrictEqual(retryDelivery.lastError, {
+			kind: "network_error",
+			message: "Outbound webhook URL hostname could not be resolved",
+		});
+		assert.strictEqual(deliveredRequest, null);
+
+		await forceDeliveryDue(createSubscriptionPayload.subscription.id, {
+			nextAttemptAt: new Date(fixedNow.getTime() - 1_000),
+			updatedAt: fixedNow,
+		});
+		assert.strictEqual(await server.outboundWebhookWorker.drainOnce(), 1);
+
+		const delivered = await getDeliveryRow(
+			createSubscriptionPayload.subscription.id,
+		);
+		assert.ok(delivered, "expected delivery row after retry");
+		assert.strictEqual(delivered.lastStatus, "delivered");
+		assert.strictEqual(delivered.attemptCount, 2);
+		assert.ok(delivered.deliveredAt);
+		const capturedRequest = deliveredRequest as {
+			url: string;
+			method: string;
+			headers: Headers;
+			body: string;
+		} | null;
+		assert.ok(capturedRequest, "expected captured request details");
+		assert.strictEqual(
+			capturedRequest.url,
+			"https://hooks.example.com/oc/hooks/agent",
+		);
+		assert.strictEqual(capturedRequest.method, "POST");
+		assert.strictEqual(
+			capturedRequest.headers.get("authorization"),
+			"Bearer oc_dns_retry_token",
+		);
+	} finally {
+		globalThis.fetch = originalFetch;
+		await cleanupOrg(orgId);
+		await server.close();
+		restoreEnv();
+	}
+});
+
 void test("integration: outbound webhooks deliver OpenClaw wake payloads with x-openclaw-token and dedupe repeated events", {
 	concurrency: false,
 }, async () => {

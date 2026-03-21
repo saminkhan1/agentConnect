@@ -318,7 +318,12 @@ void test("POST /agents/:id/actions/send_email returns 404 when agent is archive
 			method: "POST",
 			url: "/agents/agt_123/actions/send_email",
 			headers: { authorization: authorizationHeader },
-			payload: { to: ["user@example.com"], subject: "Hi", text: "Hello" },
+			payload: {
+				to: ["user@example.com"],
+				subject: "Hi",
+				text: "Hello",
+				idempotency_key: "idem-send-archived",
+			},
 		});
 
 		assert.strictEqual(response.statusCode, 404);
@@ -349,7 +354,12 @@ void test("POST /agents/:id/actions/send_email returns 404 when no active agentm
 			method: "POST",
 			url: "/agents/agt_123/actions/send_email",
 			headers: { authorization: authorizationHeader },
-			payload: { to: ["user@example.com"], subject: "Hi", text: "Hello" },
+			payload: {
+				to: ["user@example.com"],
+				subject: "Hi",
+				text: "Hello",
+				idempotency_key: "idem-send-missing-resource",
+			},
 		});
 
 		assert.strictEqual(response.statusCode, 404);
@@ -382,7 +392,12 @@ void test("POST /agents/:id/actions/send_email returns 403 when policy blocks re
 			method: "POST",
 			url: "/agents/agt_123/actions/send_email",
 			headers: { authorization: authorizationHeader },
-			payload: { to: ["blocked@other.com"], subject: "Hi", text: "Hello" },
+			payload: {
+				to: ["blocked@other.com"],
+				subject: "Hi",
+				text: "Hello",
+				idempotency_key: "idem-send-policy-blocked",
+			},
 		});
 
 		assert.strictEqual(response.statusCode, 403);
@@ -484,6 +499,33 @@ void test("POST /agents/:id/actions/send_email returns 200 and emits email.sent 
 	}
 });
 
+void test("POST /agents/:id/actions/send_email returns 400 when idempotency_key is missing", async () => {
+	const server = await buildServer();
+	const { authorizationHeader, restore } = await installAuthApiKey(server);
+
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/agents/agt_123/actions/send_email",
+			headers: { authorization: authorizationHeader },
+			payload: {
+				to: ["user@example.com"],
+				subject: "Hi",
+				text: "Hello",
+			},
+		});
+
+		assert.strictEqual(response.statusCode, 400);
+		assert.match(
+			response.json<{ message: string }>().message,
+			/idempotency_key/i,
+		);
+	} finally {
+		restore();
+		await server.close();
+	}
+});
+
 void test("POST /agents/:id/actions/send_email accepts multiple reply_to addresses", async () => {
 	const server = await buildServer();
 	const { authorizationHeader, restore } = await installAuthApiKey(server);
@@ -536,6 +578,7 @@ void test("POST /agents/:id/actions/send_email accepts multiple reply_to address
 				subject: "Hi",
 				text: "Hello",
 				reply_to: ["reply-one@example.com", "reply-two@example.com"],
+				idempotency_key: "idem-send-multi-reply-to",
 			},
 		});
 
@@ -666,6 +709,14 @@ void test("POST /agents/:id/actions/send_email returns AgentMail validation erro
 		findActiveByAgentIdAndType: (_agentId, _type, _provider) =>
 			Promise.resolve(resource),
 	});
+	const outboundActions = createMemoryOutboundActionsDal();
+	const restoreEvents = installEventsDalMock({
+		findById: () => Promise.resolve(null),
+		findByIdempotencyKey: () => Promise.resolve(null),
+	});
+	const restoreOutboundActions = installOutboundActionsDalMock(
+		outboundActions.methods,
+	);
 	const restoreAdapter = installAgentMailAdapterMock(server, {
 		performAction: () =>
 			Promise.reject(
@@ -682,7 +733,12 @@ void test("POST /agents/:id/actions/send_email returns AgentMail validation erro
 			method: "POST",
 			url: "/agents/agt_123/actions/send_email",
 			headers: { authorization: authorizationHeader },
-			payload: { to: ["user@example.com"], subject: "Hi", text: "Hello" },
+			payload: {
+				to: ["user@example.com"],
+				subject: "Hi",
+				text: "Hello",
+				idempotency_key: "idem-send-validation",
+			},
 		});
 
 		assert.strictEqual(response.statusCode, 400);
@@ -691,6 +747,8 @@ void test("POST /agents/:id/actions/send_email returns AgentMail validation erro
 		restore();
 		restoreAgents();
 		restoreResources();
+		restoreEvents();
+		restoreOutboundActions();
 		restoreAdapter();
 		await server.close();
 	}
@@ -1679,7 +1737,11 @@ void test("POST /agents/:id/actions/reply_email returns 404 when agent not found
 				authorization: authorizationHeader,
 				"content-type": "application/json",
 			},
-			payload: { message_id: "msg_001", text: "Hello" },
+			payload: {
+				message_id: "msg_001",
+				text: "Hello",
+				idempotency_key: "idem-reply-missing-agent",
+			},
 		});
 		assert.strictEqual(response.statusCode, 404);
 	} finally {
@@ -1708,7 +1770,11 @@ void test("POST /agents/:id/actions/reply_email returns 404 when no active email
 				authorization: authorizationHeader,
 				"content-type": "application/json",
 			},
-			payload: { message_id: "msg_001", text: "Hello" },
+			payload: {
+				message_id: "msg_001",
+				text: "Hello",
+				idempotency_key: "idem-reply-missing-resource",
+			},
 		});
 		assert.strictEqual(response.statusCode, 404);
 		const body = response.json<{ message: string }>();
@@ -1740,6 +1806,14 @@ void test("POST /agents/:id/actions/reply_email returns 200 and emits email.sent
 	const restoreResources = installResourcesDalMock({
 		findActiveByAgentIdAndType: () => Promise.resolve(emailResource),
 	});
+	const outboundActions = createMemoryOutboundActionsDal();
+	const restoreEvents = installEventsDalMock({
+		findById: () => Promise.resolve(null),
+		findByIdempotencyKey: () => Promise.resolve(null),
+	});
+	const restoreOutboundActions = installOutboundActionsDalMock(
+		outboundActions.methods,
+	);
 
 	const adapterCalls: unknown[] = [];
 	const restoreAdapter = installAgentMailAdapterMock(server, {
@@ -1798,7 +1872,11 @@ void test("POST /agents/:id/actions/reply_email returns 200 and emits email.sent
 				authorization: authorizationHeader,
 				"content-type": "application/json",
 			},
-			payload: { message_id: "msg_original_001", text: "Reply text" },
+			payload: {
+				message_id: "msg_original_001",
+				text: "Reply text",
+				idempotency_key: "idem-reply-success",
+			},
 		});
 
 		assert.strictEqual(response.statusCode, 200);
@@ -1832,8 +1910,39 @@ void test("POST /agents/:id/actions/reply_email returns 200 and emits email.sent
 		restore();
 		restoreAgents();
 		restoreResources();
+		restoreEvents();
+		restoreOutboundActions();
 		restoreAdapter();
 		restoreWriter();
+		await server.close();
+	}
+});
+
+void test("POST /agents/:id/actions/reply_email returns 400 when idempotency_key is missing", async () => {
+	const server = await buildServer();
+	const { authorizationHeader, restore } = await installAuthApiKey(server);
+
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/agents/agt_123/actions/reply_email",
+			headers: {
+				authorization: authorizationHeader,
+				"content-type": "application/json",
+			},
+			payload: {
+				message_id: "msg_001",
+				text: "Hello",
+			},
+		});
+
+		assert.strictEqual(response.statusCode, 400);
+		assert.match(
+			response.json<{ message: string }>().message,
+			/idempotency_key/i,
+		);
+	} finally {
+		restore();
 		await server.close();
 	}
 });
@@ -1907,6 +2016,7 @@ void test("POST /agents/:id/actions/reply_email accepts multiple reply_to addres
 				message_id: "msg_original_001",
 				text: "Reply text",
 				reply_to: ["reply-one@example.com", "reply-two@example.com"],
+				idempotency_key: "idem-reply-multi-reply-to",
 			},
 		});
 
@@ -2099,7 +2209,11 @@ void test("POST /agents/:id/actions/reply_email returns 403 when original sender
 				authorization: authorizationHeader,
 				"content-type": "application/json",
 			},
-			payload: { message_id: "msg_original_001", text: "Reply text" },
+			payload: {
+				message_id: "msg_original_001",
+				text: "Reply text",
+				idempotency_key: "idem-reply-policy-blocked",
+			},
 		});
 
 		assert.strictEqual(response.statusCode, 403);
@@ -2164,7 +2278,11 @@ void test("POST /agents/:id/actions/reply_email uses original recipients for sen
 				authorization: authorizationHeader,
 				"content-type": "application/json",
 			},
-			payload: { message_id: "msg_original_001", text: "Reply text" },
+			payload: {
+				message_id: "msg_original_001",
+				text: "Reply text",
+				idempotency_key: "idem-reply-original-recipients",
+			},
 		});
 
 		assert.strictEqual(response.statusCode, 403);
@@ -2219,7 +2337,11 @@ void test("POST /agents/:id/actions/reply_email returns provider 404s for missin
 				authorization: authorizationHeader,
 				"content-type": "application/json",
 			},
-			payload: { message_id: "msg_missing", text: "Reply text" },
+			payload: {
+				message_id: "msg_missing",
+				text: "Reply text",
+				idempotency_key: "idem-reply-missing-original-message",
+			},
 		});
 
 		assert.strictEqual(response.statusCode, 404);
@@ -2252,6 +2374,14 @@ void test("POST /agents/:id/actions/reply_email returns provider 403s from Agent
 	const restoreResources = installResourcesDalMock({
 		findActiveByAgentIdAndType: () => Promise.resolve(emailResource),
 	});
+	const outboundActions = createMemoryOutboundActionsDal();
+	const restoreEvents = installEventsDalMock({
+		findById: () => Promise.resolve(null),
+		findByIdempotencyKey: () => Promise.resolve(null),
+	});
+	const restoreOutboundActions = installOutboundActionsDalMock(
+		outboundActions.methods,
+	);
 	const restoreAdapter = installAgentMailAdapterMock(server, {
 		performAction: (_resource, action) => {
 			if (action === "get_message") {
@@ -2284,7 +2414,11 @@ void test("POST /agents/:id/actions/reply_email returns provider 403s from Agent
 				authorization: authorizationHeader,
 				"content-type": "application/json",
 			},
-			payload: { message_id: "msg_original_001", text: "Reply text" },
+			payload: {
+				message_id: "msg_original_001",
+				text: "Reply text",
+				idempotency_key: "idem-reply-provider-403",
+			},
 		});
 
 		assert.strictEqual(response.statusCode, 403);
@@ -2293,6 +2427,8 @@ void test("POST /agents/:id/actions/reply_email returns provider 403s from Agent
 		restore();
 		restoreAgents();
 		restoreResources();
+		restoreEvents();
+		restoreOutboundActions();
 		restoreAdapter();
 		await server.close();
 	}
@@ -3030,6 +3166,101 @@ void test("AgentMailAdapter.performAction forwards replyTo when sending or reply
 		"reply-one@example.com",
 		"reply-two@example.com",
 	]);
+});
+
+void test("AgentMailAdapter.performAction forwards abort signals to AgentMail requests", async () => {
+	const adapter = new AgentMailAdapter("key", "secret");
+	const sendController = new AbortController();
+	const replyController = new AbortController();
+	const getController = new AbortController();
+	let sendOptions: unknown;
+	let replyOptions: unknown;
+	let getOptions: unknown;
+
+	(adapter as unknown as { client: Record<string, unknown> }).client = {
+		inboxes: {
+			messages: {
+				send: (_inboxId: string, _request: unknown, options?: unknown) => {
+					sendOptions = options;
+					return Promise.resolve({
+						messageId: "msg_sent_123",
+						threadId: "thread_123",
+					});
+				},
+				reply: (
+					_inboxId: string,
+					_messageId: string,
+					_request: unknown,
+					options?: unknown,
+				) => {
+					replyOptions = options;
+					return Promise.resolve({
+						messageId: "msg_reply_123",
+						threadId: "thread_123",
+					});
+				},
+				get: (_inboxId: string, _messageId: string, options?: unknown) => {
+					getOptions = options;
+					return Promise.resolve({
+						messageId: "msg_original_123",
+						threadId: "thread_123",
+						inboxId: "agent@mail.example.com",
+						labels: [],
+						from: "customer@example.com",
+						to: ["agent@mail.example.com"],
+						cc: [],
+						bcc: [],
+						subject: "Hello",
+						text: "Body",
+						html: null,
+						replyTo: [],
+						size: 1024,
+						updatedAt: FIXED_TIMESTAMP,
+						createdAt: FIXED_TIMESTAMP,
+						timestamp: FIXED_TIMESTAMP,
+					});
+				},
+			},
+		},
+	};
+
+	const resource = buildResourceRecord({
+		id: "res_email_123",
+		providerRef: "agent@mail.example.com",
+		providerOrgId: "pod_123",
+		config: { email_address: "agent@mail.example.com" },
+	});
+
+	await adapter.performAction(
+		resource,
+		"send_email",
+		{
+			to: ["customer@example.com"],
+			subject: "Hello",
+			text: "Body",
+		},
+		{ abortSignal: sendController.signal },
+	);
+	await adapter.performAction(
+		resource,
+		"reply_email",
+		{
+			message_id: "msg_original_123",
+			text: "Reply body",
+			reply_recipients: ["customer@example.com"],
+		},
+		{ abortSignal: replyController.signal },
+	);
+	await adapter.performAction(
+		resource,
+		"get_message",
+		{ message_id: "msg_original_123" },
+		{ abortSignal: getController.signal },
+	);
+
+	assert.deepStrictEqual(sendOptions, { abortSignal: sendController.signal });
+	assert.deepStrictEqual(replyOptions, { abortSignal: replyController.signal });
+	assert.deepStrictEqual(getOptions, { abortSignal: getController.signal });
 });
 
 void test("AgentMailAdapter.performAction tolerates additive AgentMail message fields", async () => {

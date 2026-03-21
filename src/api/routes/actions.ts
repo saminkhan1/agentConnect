@@ -469,10 +469,15 @@ async function prepareReplyEmailRequestData(
 	let originalMessage: Record<string, unknown>;
 	try {
 		originalMessage = await withTimeout(
-			() =>
-				adapter.performAction(resource, "get_message", {
-					message_id: input.message_id,
-				}),
+			(signal) =>
+				adapter.performAction(
+					resource,
+					"get_message",
+					{
+						message_id: input.message_id,
+					},
+					{ abortSignal: signal },
+				),
 			ADAPTER_TIMEOUT_MS,
 		);
 	} catch (error) {
@@ -671,6 +676,7 @@ const actionsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
 					409: errorResponseSchema,
 					403: errorResponseSchema,
 					404: errorResponseSchema,
+					422: errorResponseSchema,
 					500: errorResponseSchema,
 					502: errorResponseSchema,
 					503: errorResponseSchema,
@@ -786,8 +792,8 @@ const actionsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
 
 			if (!server.stripeAdapter) {
 				return reply
-					.code(500)
-					.send({ message: "Stripe adapter not configured" });
+					.code(422)
+					.send({ message: "Card capabilities are not currently available" });
 			}
 
 			let resource: ResourceRecord;
@@ -951,6 +957,7 @@ const actionsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
 					403: errorResponseSchema,
 					404: errorResponseSchema,
 					409: errorResponseSchema,
+					422: errorResponseSchema,
 					500: errorResponseSchema,
 					502: errorResponseSchema,
 					503: errorResponseSchema,
@@ -982,8 +989,8 @@ const actionsRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
 
 			if (!server.stripeAdapter) {
 				return reply
-					.code(500)
-					.send({ message: "Stripe adapter not configured" });
+					.code(422)
+					.send({ message: "Card capabilities are not currently available" });
 			}
 
 			try {

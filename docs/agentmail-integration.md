@@ -9,7 +9,7 @@ AgentConnect uses [AgentMail](https://agentmail.to) as the email provider for pr
 | `AGENTMAIL_API_KEY`        | Yes (for email)    | AgentMail API key                         |
 | `AGENTMAIL_WEBHOOK_SECRET` | Yes (for webhooks) | Svix webhook signing secret (`whsec_...`) |
 
-When these variables are absent the server starts normally but `agentmail` provider is unavailable. `POST /agents/:id/actions/send_email` will return `500` and `POST /webhooks/agentmail` will return `500`.
+When these variables are absent the server starts normally but the `agentmail` provider is unavailable. Provisioning inboxes, sending mail, replying to mail, and ingesting AgentMail webhooks will fail until the adapter is configured.
 
 ## Provisioning
 
@@ -30,11 +30,37 @@ When these variables are absent the server starts normally but `agentmail` provi
   "cc": ["cc@example.com"],
   "bcc": ["bcc@example.com"],
   "reply_to": ["replyto@example.com", "fallback@example.com"],
-  "idempotency_key": "optional-client-key"
+  "idempotency_key": "required-client-key"
 }
 ```
 
+`idempotency_key` is required. AgentConnect persists outbound action state keyed by `(org_id, action, idempotency_key)` so callers can safely retry the same send without creating duplicate mail.
+
 AgentConnect records the provider `message_id` and `thread_id` returned by the send call immediately. Later webhook events add delivery lifecycle updates for the same message.
+
+## Replying to Email
+
+`POST /agents/:id/actions/reply_email` replies from the agent's active AgentMail inbox to a previously fetched or delivered message.
+
+**Request body**:
+
+```json
+{
+  "message_id": "msg_123",
+  "text": "Thanks for the update",
+  "html": "<p>Thanks for the update</p>",
+  "cc": ["teammate@example.com"],
+  "bcc": ["audit@example.com"],
+  "reply_to": ["replyto@example.com"],
+  "idempotency_key": "required-reply-key"
+}
+```
+
+The same required-idempotency rules apply to replies. AgentConnect fetches the original message first so policy checks and recipient reconstruction happen against provider truth, not caller-supplied fields.
+
+## Timeouts and Retries
+
+AgentConnect forwards request abort signals to AgentMail for `send_email`, `reply_email`, and `get_message`. Combined with the required idempotency keys, this makes timeout-driven retries safe: use the same `idempotency_key` when retrying the same operation.
 
 ## Webhook Integration
 

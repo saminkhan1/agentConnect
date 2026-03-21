@@ -9,6 +9,7 @@ import { generateApiKeyMaterial } from "../src/domain/api-keys";
 const healthResponseSchema = z.object({
 	status: z.literal("ok"),
 	timestamp: z.iso.datetime(),
+	webhookDeliveryBacklog: z.number().int().optional(),
 });
 
 const createOrgResponseSchema = z.object({
@@ -34,6 +35,23 @@ const createServiceApiKeyResponseSchema = z.object({
 		key: z.string(),
 		createdAt: z.iso.datetime(),
 	}),
+});
+
+const rotateRootKeyResponseSchema = z.object({
+	apiKey: z.object({
+		id: z.string(),
+		orgId: z.string(),
+		keyType: z.literal("root"),
+		key: z.string(),
+		createdAt: z.iso.datetime(),
+	}),
+	previousKeyId: z.string(),
+	message: z.string(),
+});
+
+const revokeApiKeyResponseSchema = z.object({
+	revokedKeyId: z.string(),
+	message: z.string(),
 });
 
 const capturedCreateOrgInputSchema = z.object({
@@ -97,6 +115,27 @@ void test("subsequent requests include x-correlation-id", async () => {
 
 		const correlationId2 = response2.headers["x-correlation-id"];
 		assert.strictEqual(correlationId2, "my-custom-id");
+	} finally {
+		await server.close();
+	}
+});
+
+void test("health endpoint includes webhookDeliveryBacklog field", async () => {
+	const server = await buildServer();
+	try {
+		const response = await server.inject({
+			method: "GET",
+			url: "/health",
+		});
+
+		assert.strictEqual(response.statusCode, 200);
+		const payload = JSON.parse(response.payload) as Record<string, unknown>;
+		assert.strictEqual(payload.status, "ok");
+		assert.strictEqual(typeof payload.webhookDeliveryBacklog, "number");
+		assert.ok(
+			(payload.webhookDeliveryBacklog as number) >= 0,
+			"webhookDeliveryBacklog should be non-negative",
+		);
 	} finally {
 		await server.close();
 	}
@@ -435,6 +474,392 @@ void test("public routes fail closed when malformed authorization header is pres
 		const rawPayload: unknown = JSON.parse(response.payload);
 		const payload = errorResponseSchema.parse(rawPayload);
 		assert.strictEqual(payload.message, "Unauthorized");
+	} finally {
+		await server.close();
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Key rotation tests
+// ---------------------------------------------------------------------------
+
+void test("POST /orgs/:id/api-keys/rotate-root issues a new root key and keeps the previous key active until explicit revocation", async () => {
+	const server = await buildServer();
+	const rootKey = await generateApiKeyMaterial();
+	const createdAt = new Date("2026-03-01T00:00:00.000Z");
+	const apiKeys = new Map([
+		[
+			rootKey.id,
+			{
+				id: rootKey.id,
+				orgId: "org_123",
+				keyType: "root" as const,
+				keyHash: rootKey.keyHash,
+				isRevoked: false,
+				createdAt,
+			},
+		],
+	]);
+
+	server.systemDal.getApiKeyById = (id) =>
+		Promise.resolve(apiKeys.get(id) ?? null);
+
+	server.systemDal.getOrg = (id) =>
+		Promise.resolve({
+			id,
+			name: "Acme AI",
+			planTier: "starter" as const,
+			stripeCustomerId: null,
+			stripeSubscriptionId: null,
+			subscriptionStatus: "incomplete" as const,
+			currentPeriodEnd: null,
+			createdAt,
+		});
+
+	const insertedKeys: Array<{ id: string; keyType: string; keyHash: string }> =
+		[];
+
+	const originalApiKeysDescriptor = Object.getOwnPropertyDescriptor(
+		DalFactory.prototype,
+		"apiKeys",
+	);
+	Object.defineProperty(DalFactory.prototype, "apiKeys", {
+		configurable: true,
+		get() {
+			return {
+				findById: (id: string) => Promise.resolve(apiKeys.get(id) ?? null),
+				findMany: () => Promise.resolve(Array.from(apiKeys.values())),
+				insert: (data: { id: string; keyType: string; keyHash: string }) => {
+					insertedKeys.push(data);
+					const record = {
+						id: data.id,
+						orgId: "org_123",
+						keyType: "root" as const,
+						keyHash: data.keyHash,
+						isRevoked: false,
+						createdAt,
+					};
+					apiKeys.set(record.id, record);
+					return Promise.resolve(record);
+				},
+				revokeById: (id: string) => {
+					const existing = apiKeys.get(id) ?? null;
+					if (!existing) {
+						return Promise.resolve(null);
+					}
+					const revoked = { ...existing, isRevoked: true };
+					apiKeys.set(id, revoked);
+					return Promise.resolve(revoked);
+				},
+			};
+		},
+	});
+
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/orgs/org_123/api-keys/rotate-root",
+			headers: {
+				authorization: `Bearer ${rootKey.plaintextKey}`,
+			},
+		});
+
+		assert.strictEqual(response.statusCode, 200);
+		const payload = rotateRootKeyResponseSchema.parse(
+			JSON.parse(response.payload) as unknown,
+		);
+
+		assert.strictEqual(payload.apiKey.orgId, "org_123");
+		assert.strictEqual(payload.apiKey.keyType, "root");
+		assert.notStrictEqual(payload.apiKey.id, rootKey.id);
+		assert.strictEqual(payload.previousKeyId, rootKey.id);
+		assert.match(payload.apiKey.key, /^sk_/);
+		assert.match(payload.message, /keep your current root key/i);
+
+		assert.strictEqual(insertedKeys.length, 1);
+		assert.strictEqual(insertedKeys[0].keyType, "root");
+		assert.strictEqual(apiKeys.get(rootKey.id)?.isRevoked, false);
+	} finally {
+		if (originalApiKeysDescriptor) {
+			Object.defineProperty(
+				DalFactory.prototype,
+				"apiKeys",
+				originalApiKeysDescriptor,
+			);
+		}
+		await server.close();
+	}
+});
+
+void test("POST /orgs/:id/api-keys/:keyId/revoke revokes the previous root key after a new root is issued", async () => {
+	const server = await buildServer();
+	const rootKey = await generateApiKeyMaterial();
+	const createdAt = new Date("2026-03-01T00:00:00.000Z");
+
+	const apiKeys = new Map<
+		string,
+		{
+			id: string;
+			orgId: string;
+			keyType: "root" | "service";
+			keyHash: string;
+			isRevoked: boolean;
+			createdAt: Date;
+		}
+	>([
+		[
+			rootKey.id,
+			{
+				id: rootKey.id,
+				orgId: "org_123",
+				keyType: "root",
+				keyHash: rootKey.keyHash,
+				isRevoked: false,
+				createdAt,
+			},
+		],
+	]);
+
+	server.systemDal.getApiKeyById = (id) =>
+		Promise.resolve(apiKeys.get(id) ?? null);
+	server.systemDal.getOrg = (id) =>
+		Promise.resolve({
+			id,
+			name: "Acme AI",
+			planTier: "starter" as const,
+			stripeCustomerId: null,
+			stripeSubscriptionId: null,
+			subscriptionStatus: "incomplete" as const,
+			currentPeriodEnd: null,
+			createdAt,
+		});
+
+	const originalApiKeysDescriptor = Object.getOwnPropertyDescriptor(
+		DalFactory.prototype,
+		"apiKeys",
+	);
+	Object.defineProperty(DalFactory.prototype, "apiKeys", {
+		configurable: true,
+		get() {
+			return {
+				findById: (id: string) => Promise.resolve(apiKeys.get(id) ?? null),
+				findMany: () => Promise.resolve(Array.from(apiKeys.values())),
+				insert: (data: { id: string; keyType: string; keyHash: string }) => {
+					const record: {
+						id: string;
+						orgId: string;
+						keyType: "root" | "service";
+						keyHash: string;
+						isRevoked: boolean;
+						createdAt: Date;
+					} = {
+						id: data.id,
+						orgId: "org_123",
+						keyType: data.keyType as "root" | "service",
+						keyHash: data.keyHash,
+						isRevoked: false,
+						createdAt,
+					};
+					apiKeys.set(record.id, record);
+					return Promise.resolve(record);
+				},
+				revokeById: (id: string) => {
+					const existing = apiKeys.get(id) ?? null;
+					if (existing) {
+						apiKeys.set(id, { ...existing, isRevoked: true });
+					}
+					return Promise.resolve(
+						existing ? { ...existing, isRevoked: true } : null,
+					);
+				},
+			};
+		},
+	});
+
+	try {
+		const firstResponse = await server.inject({
+			method: "POST",
+			url: "/orgs/org_123/api-keys/rotate-root",
+			headers: {
+				authorization: `Bearer ${rootKey.plaintextKey}`,
+			},
+		});
+		assert.strictEqual(firstResponse.statusCode, 200);
+		const rotatePayload = rotateRootKeyResponseSchema.parse(
+			JSON.parse(firstResponse.payload) as unknown,
+		);
+
+		const revokeResponse = await server.inject({
+			method: "POST",
+			url: `/orgs/org_123/api-keys/${rootKey.id}/revoke`,
+			headers: {
+				authorization: `Bearer ${rotatePayload.apiKey.key}`,
+			},
+		});
+
+		assert.strictEqual(revokeResponse.statusCode, 200);
+		const revokePayload = revokeApiKeyResponseSchema.parse(
+			JSON.parse(revokeResponse.payload) as unknown,
+		);
+		assert.strictEqual(revokePayload.revokedKeyId, rootKey.id);
+		assert.match(revokePayload.message, /revoked/i);
+		assert.strictEqual(apiKeys.get(rootKey.id)?.isRevoked, true);
+
+		const oldKeyResponse = await server.inject({
+			method: "POST",
+			url: "/orgs/org_123/api-keys",
+			headers: {
+				authorization: `Bearer ${rootKey.plaintextKey}`,
+			},
+		});
+		assert.strictEqual(oldKeyResponse.statusCode, 401);
+	} finally {
+		if (originalApiKeysDescriptor) {
+			Object.defineProperty(
+				DalFactory.prototype,
+				"apiKeys",
+				originalApiKeysDescriptor,
+			);
+		}
+		await server.close();
+	}
+});
+
+void test("POST /orgs/:id/api-keys/:keyId/revoke returns 409 when revoking the last active root key", async () => {
+	const server = await buildServer();
+	const rootKey = await generateApiKeyMaterial();
+	const createdAt = new Date("2026-03-01T00:00:00.000Z");
+	const apiKeys = new Map([
+		[
+			rootKey.id,
+			{
+				id: rootKey.id,
+				orgId: "org_123",
+				keyType: "root" as const,
+				keyHash: rootKey.keyHash,
+				isRevoked: false,
+				createdAt,
+			},
+		],
+	]);
+
+	server.systemDal.getApiKeyById = (id) =>
+		Promise.resolve(apiKeys.get(id) ?? null);
+	server.systemDal.getOrg = (id) =>
+		Promise.resolve({
+			id,
+			name: "Acme AI",
+			planTier: "starter" as const,
+			stripeCustomerId: null,
+			stripeSubscriptionId: null,
+			subscriptionStatus: "incomplete" as const,
+			currentPeriodEnd: null,
+			createdAt,
+		});
+
+	const originalApiKeysDescriptor = Object.getOwnPropertyDescriptor(
+		DalFactory.prototype,
+		"apiKeys",
+	);
+	Object.defineProperty(DalFactory.prototype, "apiKeys", {
+		configurable: true,
+		get() {
+			return {
+				findById: (id: string) => Promise.resolve(apiKeys.get(id) ?? null),
+				findMany: () => Promise.resolve(Array.from(apiKeys.values())),
+				insert: (_data: unknown) =>
+					Promise.reject(new Error("unexpected insert")),
+				revokeById: (id: string) => {
+					const existing = apiKeys.get(id) ?? null;
+					if (existing) {
+						apiKeys.set(id, { ...existing, isRevoked: true });
+					}
+					return Promise.resolve(
+						existing ? { ...existing, isRevoked: true } : null,
+					);
+				},
+			};
+		},
+	});
+
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: `/orgs/org_123/api-keys/${rootKey.id}/revoke`,
+			headers: {
+				authorization: `Bearer ${rootKey.plaintextKey}`,
+			},
+		});
+
+		assert.strictEqual(response.statusCode, 409);
+		const payload = errorResponseSchema.parse(JSON.parse(response.payload));
+		assert.match(payload.message, /at least one active root key must remain/i);
+		assert.strictEqual(apiKeys.get(rootKey.id)?.isRevoked, false);
+	} finally {
+		if (originalApiKeysDescriptor) {
+			Object.defineProperty(
+				DalFactory.prototype,
+				"apiKeys",
+				originalApiKeysDescriptor,
+			);
+		}
+		await server.close();
+	}
+});
+
+void test("POST /orgs/:id/api-keys/rotate-root returns 403 for service keys", async () => {
+	const server = await buildServer();
+	const serviceKey = await generateApiKeyMaterial();
+
+	server.systemDal.getApiKeyById = (_id) =>
+		Promise.resolve({
+			id: serviceKey.id,
+			orgId: "org_123",
+			keyType: "service",
+			keyHash: serviceKey.keyHash,
+			isRevoked: false,
+			createdAt: new Date("2026-03-01T00:00:00.000Z"),
+		});
+
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/orgs/org_123/api-keys/rotate-root",
+			headers: {
+				authorization: `Bearer ${serviceKey.plaintextKey}`,
+			},
+		});
+
+		assert.strictEqual(response.statusCode, 403);
+	} finally {
+		await server.close();
+	}
+});
+
+void test("POST /orgs/:id/api-keys/rotate-root returns 403 for wrong org", async () => {
+	const server = await buildServer();
+	const rootKey = await generateApiKeyMaterial();
+
+	server.systemDal.getApiKeyById = (_id) =>
+		Promise.resolve({
+			id: rootKey.id,
+			orgId: "org_123",
+			keyType: "root",
+			keyHash: rootKey.keyHash,
+			isRevoked: false,
+			createdAt: new Date("2026-03-01T00:00:00.000Z"),
+		});
+
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/orgs/org_999/api-keys/rotate-root",
+			headers: {
+				authorization: `Bearer ${rootKey.plaintextKey}`,
+			},
+		});
+
+		assert.strictEqual(response.statusCode, 403);
 	} finally {
 		await server.close();
 	}

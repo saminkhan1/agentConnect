@@ -73,10 +73,15 @@ const messagesRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
 			let result: Record<string, unknown>;
 			try {
 				result = await withTimeout(
-					() =>
-						adapter.performAction(emailResource, "get_message", {
-							message_id: request.params.messageId,
-						}),
+					(signal) =>
+						adapter.performAction(
+							emailResource,
+							"get_message",
+							{
+								message_id: request.params.messageId,
+							},
+							{ abortSignal: signal },
+						),
 					ADAPTER_TIMEOUT_MS,
 				);
 			} catch (error) {

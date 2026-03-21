@@ -225,6 +225,11 @@ void test("buildMcpServer with root auth registers all tools", async () => {
 	const { session, restore } = await buildAuthenticatedMcpSession(server, {
 		keyType: "root",
 	});
+
+	// Mock stripeAdapter as present so payment tools are registered
+	const originalAdapter = server.stripeAdapter;
+	server.stripeAdapter = {} as typeof server.stripeAdapter;
+
 	try {
 		const mcp = buildMcpServer(server, session);
 		const tools = Object.keys(
@@ -262,6 +267,7 @@ void test("buildMcpServer with root auth registers all tools", async () => {
 			"Exactly 17 tools should be registered",
 		);
 	} finally {
+		server.stripeAdapter = originalAdapter;
 		restore();
 		await server.close();
 	}
@@ -272,6 +278,11 @@ void test("buildMcpServer with service auth hides root-only bootstrap tools", as
 	const { session, restore } = await buildAuthenticatedMcpSession(server, {
 		keyType: "service",
 	});
+
+	// Mock stripeAdapter as present so payment tools are registered
+	const originalAdapter = server.stripeAdapter;
+	server.stripeAdapter = {} as typeof server.stripeAdapter;
+
 	try {
 		const mcp = buildMcpServer(server, session);
 		const tools = Object.keys(
@@ -285,6 +296,7 @@ void test("buildMcpServer with service auth hides root-only bootstrap tools", as
 		assert.ok(!tools.includes("agentinfra.api_keys.create_service"));
 		assert.strictEqual(tools.length, 15);
 	} finally {
+		server.stripeAdapter = originalAdapter;
 		restore();
 		await server.close();
 	}
@@ -295,6 +307,11 @@ void test("buildMcpServer with service auth plus stdio fallback hides root-only 
 	const { session, restore } = await buildAuthenticatedMcpSession(server, {
 		keyType: "service",
 	});
+
+	// Mock stripeAdapter as present so payment tools are registered
+	const originalAdapter = server.stripeAdapter;
+	server.stripeAdapter = {} as typeof server.stripeAdapter;
+
 	try {
 		const mcp = buildMcpServer(server, {
 			...session,
@@ -310,6 +327,40 @@ void test("buildMcpServer with service auth plus stdio fallback hides root-only 
 			!tools.includes("agentinfra.payments.create_card_details_session"),
 		);
 	} finally {
+		server.stripeAdapter = originalAdapter;
+		restore();
+		await server.close();
+	}
+});
+
+void test("buildMcpServer omits payment tools when Stripe adapter is not configured", async () => {
+	const server = await buildServer();
+	const { session, restore } = await buildAuthenticatedMcpSession(server, {
+		keyType: "root",
+	});
+
+	const originalAdapter = server.stripeAdapter;
+	server.stripeAdapter = undefined;
+
+	try {
+		const mcp = buildMcpServer(server, {
+			...session,
+			allowToolAuthorizationFallback: true,
+		});
+		const tools = Object.keys(
+			(mcp as unknown as { _registeredTools: Record<string, unknown> })
+				._registeredTools,
+		);
+
+		assert.ok(!tools.includes("agentinfra.payments.issue_card"));
+		assert.ok(
+			!tools.includes("agentinfra.payments.create_card_details_session"),
+		);
+		// Other tools should still be present
+		assert.ok(tools.includes("agentinfra.agents.create"));
+		assert.ok(tools.includes("agentinfra.email.send"));
+	} finally {
+		server.stripeAdapter = originalAdapter;
 		restore();
 		await server.close();
 	}

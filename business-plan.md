@@ -2,7 +2,7 @@
 
 ## Goal
 
-AgentConnect should become profitable quickly by being the easiest way to connect a personal AI agent to real-world providers. The first wedge is not "enterprise agent infrastructure." The first wedge is managed, fast, safe access for individuals and prosumers who want their AI agent to send email and later take tightly bounded payment actions.
+AgentConnect should become profitable quickly by being the easiest way to connect a personal AI agent to real-world providers. The first wedge is not "enterprise agent infrastructure." The first wedge is managed, fast, safe access for individuals and prosumers who want their AI agent to send email and make tightly bounded payments — both from day 1, under one identity.
 
 The expansion path is:
 
@@ -28,19 +28,19 @@ That is the product.
 
 ## Marketing Position
 
-The positioning should be concrete and consumer-understandable.
+The positioning should be concrete and consumer-understandable. Lead with the unification — that's the moat.
 
-- "Give your AI assistant a real email inbox."
-- "Let your AI assistant email your landlord, recruiter, or customer."
-- "Let your AI assistant buy something online with a locked-down virtual card."
-- "Connect your personal AI agent to real providers in minutes."
+- "One identity for your autonomous AI agent. Email. Payments. Full audit trail."
+- "Your agent sent an email to a vendor, then bought supplies on Amazon — and you can see both in one timeline."
+- "One MCP config gives your Claude agent email and payment capabilities."
+- "Instead of managing AgentMail + AgentCard separately, one API key covers everything."
 
 ### Example stories
 
-- My AI assistant wrote and sent an email to my landlord about a maintenance problem.
-- My AI assistant bought me an anime T-shirt from Shopify using a virtual card with a spend limit.
+- My AI assistant wrote and sent an email to my landlord about a maintenance problem, then paid the plumber with a virtual card — and I can see both in one timeline.
+- My Claude Desktop agent has one MCP config that lets it send emails, issue cards, and check its own activity history.
 
-Those examples are stronger than generic "agent infrastructure" messaging because they show clear utility.
+Those examples are stronger than generic "agent infrastructure" messaging because they show clear utility and emphasize the cross-capability value no competitor offers.
 
 ## Who We Serve First
 
@@ -69,35 +69,35 @@ Those examples are stronger than generic "agent infrastructure" messaging becaus
 ## What We Sell
 
 - managed email provisioning for AI agents (send + receive)
-- managed virtual cards for AI agents (spend + controls)
-- later: payment receiving for agents (payment links, invoicing)
-- OpenClaw-friendly connection and setup
-- event log and timeline for all agent actions across all rails
+- managed virtual cards for AI agents (spend + controls) — included at every tier
+- MCP gateway for Claude Desktop and any MCP-compatible client (one config, all capabilities)
+- OpenClaw-compatible outbound webhooks
+- unified event log and timeline for all agent actions across email + payments
 - safety controls and quotas (agents act autonomously within policy constraints — no human approval gates)
-- one agent identity that works across email, payments, and eventually SMS/voice
+- one agent identity that works across email and payments
+- later: payment receiving for agents (payment links, invoicing)
 
-The product is not just access to a provider. The product is managed access, safety, visibility, and speed. The differentiator is unification — no competitor lets one agent send an email AND buy something AND receive a payment with full audit trail.
+The product is not just access to a provider. The product is managed access, safety, visibility, and speed. The differentiator is unification — no competitor lets one agent send an email AND buy something with full audit trail under one identity.
 
-## Product Ladder
+## Product Ladder (Shipped)
 
-The ladder should start with fully managed access, not BYO-only.
+All plans include email + virtual cards from day 1. The unification IS the product — cards are not gated behind a separate tier.
 
-| Plan               | Price      | Includes                                                                                       | Intended user                     |
-| ------------------ | ---------- | ---------------------------------------------------------------------------------------------- | --------------------------------- |
-| Starter            | $19/mo     | 1 inbox, 1,000 emails, basic logs, OpenClaw setup                                              | curious personal users            |
-| Personal           | $29/mo     | 1 inbox, 2,000 emails, better logs, easier onboarding, email-only workflows                    | active personal AI users          |
-| Actions Beta       | $49/mo     | 1 inbox, 2,000 emails, logs, limited virtual card beta, spend caps, merchant/category controls | trusted power users               |
-| Power User         | $79/mo     | 3 inboxes, 10,000 emails, multiple agents, better visibility, priority async support           | creators and heavy personal users |
-| Team Starter       | $249/mo    | 10 inboxes, 25,000 emails, shared workspace, quotas, webhooks                                  | very small teams                  |
-| Growth / Dedicated | $1,000+/mo | higher limits, managed migration, dedicated setup or BYO when needed                           | startups and growing teams        |
+| Plan     | Price   | Includes                                                                                                  | Intended user                     |
+| -------- | ------- | --------------------------------------------------------------------------------------------------------- | --------------------------------- |
+| Starter  | $19/mo  | 1 agent, 1 inbox, 1,000 emails, 5 cards/mo, unified timeline, MCP gateway                                | curious personal users            |
+| Personal | $29/mo  | 1 agent, 1 inbox, 2,000 emails, 15 cards/mo, unified timeline, outbound webhooks, MCP gateway             | active personal AI users          |
+| Power    | $49/mo  | 3 agents, 3 inboxes, 5,000 emails, 50 cards/mo, unified timeline, outbound webhooks, MCP gateway          | power users and small teams       |
+
+Team tiers ($249+) deferred until demand appears. The expansion path is personal → power → team, but team features won't be built until at least 3 Power users request them.
 
 ### Pricing rules
 
 - no free managed tier
 - no unlimited plans
-- cards stay invite-only until fraud, support, and dispute patterns are well understood
+- cards included at every tier with safe defaults (Stripe spending_controls: $500/day, blocked cash advances + gambling)
+- beta access gated by SIGNUP_SECRET (manual invite), not card-specific invite
 - support is productized and async on lower tiers, not white-glove concierge
-- dedicated or BYO modes are expansion tools, not the initial requirement
 - low personal-tier prices are for acquisition, not concierge-level support
 
 ## Cost Model and Break-even Math
@@ -180,9 +180,7 @@ At current plan limits:
 
 - Starter (`1 inbox`, `1,000 emails`) fits `120` users by email volume
 - Personal (`1 inbox`, `2,000 emails`) fits `60` users by email volume
-- Actions Beta (`1 inbox`, `2,000 emails`) also fits `60` users by email volume
-- Power User (`3 inboxes`, `10,000 emails`) fits `12` users by email volume
-- Team Starter (`10 inboxes`, `25,000 emails`) fits `4` teams by email volume
+- Power (`3 inboxes`, `5,000 emails`) fits `24` users by email volume, `40` by inbox count
 
 This means email volume, not inbox count, is the first constraint for the personal wedge.
 
@@ -190,35 +188,29 @@ This means email volume, not inbox count, is the first constraint for the person
 
 #### Zero-customer live baseline: $58/month
 
-| Plan         | Revenue per customer | Customers needed to cover $58 |
-| ------------ | -------------------- | ----------------------------- |
-| Starter      | $19                  | 4                             |
-| Personal     | $29                  | 2                             |
-| Actions Beta | $49                  | 2                             |
-| Power User   | $79                  | 1                             |
-| Team Starter | $249                 | 1                             |
+| Plan     | Revenue per customer | Customers needed to cover $58 |
+| -------- | -------------------- | ----------------------------- |
+| Starter  | $19                  | 4                             |
+| Personal | $29                  | 2                             |
+| Power    | $49                  | 2                             |
 
 #### Shared-production baseline: $238/month
 
-| Plan         | Revenue per customer | Customers needed to cover $238 |
-| ------------ | -------------------- | ------------------------------ |
-| Starter      | $19                  | 13                             |
-| Personal     | $29                  | 9                              |
-| Actions Beta | $49                  | 5                              |
-| Power User   | $79                  | 4                              |
-| Team Starter | $249                 | 1                              |
+| Plan     | Revenue per customer | Customers needed to cover $238 |
+| -------- | -------------------- | ------------------------------ |
+| Starter  | $19                  | 13                             |
+| Personal | $29                  | 9                              |
+| Power    | $49                  | 5                              |
 
 ### Contribution margin by plan
 
-To estimate gross margin, allocate only AgentMail Startup cost across the usable `120,000` monthly email pool.
+To estimate gross margin, allocate only AgentMail Startup cost across the usable `120,000` monthly email pool, plus card issuance cost (~$0.10/card).
 
-| Plan         | MRR  | Allocated provider cost                        | Approx gross margin before support |
-| ------------ | ---- | ---------------------------------------------- | ---------------------------------- |
-| Starter      | $19  | `(1,000 / 120,000) * $200 = $1.67`             | about `$17.33`                     |
-| Personal     | $29  | `(2,000 / 120,000) * $200 = $3.33`             | about `$25.67`                     |
-| Actions Beta | $49  | same `$3.33` email allocation, card fees extra | about `$45+` before card incidents |
-| Power User   | $79  | `(10,000 / 120,000) * $200 = $16.67`           | about `$62.33`                     |
-| Team Starter | $249 | `(25,000 / 120,000) * $200 = $41.67`           | about `$207.33`                    |
+| Plan     | MRR  | Allocated provider cost                                         | Approx gross margin before support |
+| -------- | ---- | --------------------------------------------------------------- | ---------------------------------- |
+| Starter  | $19  | `(1,000 / 120,000) * $200 = $1.67` + `5 cards * $0.10 = $0.50` | about `$16.83`                     |
+| Personal | $29  | `(2,000 / 120,000) * $200 = $3.33` + `15 * $0.10 = $1.50`      | about `$24.17`                     |
+| Power    | $49  | `(5,000 / 120,000) * $200 = $8.33` + `50 * $0.10 = $5.00`      | about `$35.67`                     |
 
 This is why the product can work financially. Provider cost is low. The real costs are support, trust, abuse handling, and engineering time.
 
@@ -232,61 +224,62 @@ If the real goal is to cover founder survival plus operating costs:
 
 Ignoring payment processing and support overhead for a moment:
 
-| Plan mix          | Customers needed to cover $8,238 |
-| ----------------- | -------------------------------- |
-| Starter only      | `434`                            |
-| Personal only     | `285`                            |
-| Actions Beta only | `169`                            |
-| Power User only   | `105`                            |
-| Team Starter only | `34`                             |
+| Plan mix      | Customers needed to cover $8,238 |
+| ------------- | -------------------------------- |
+| Starter only  | `434`                            |
+| Personal only | `285`                            |
+| Power only    | `169`                            |
 
 This is the most important math in the document:
 
 - a pure low-ticket personal business needs a lot of users
-- power users and small teams compress the path to profitability
-- the best business is not "consumers only" and not "enterprise only"
-- the best business is personal wedge plus team expansion
+- power users compress the path to profitability
+- the best business is personal wedge plus power user expansion
 - the low entry tier is a growth lever, not the whole business
+- team tiers ($249+) will compress this further when demand appears
 
 ### Card economics
 
-Cards are compelling for marketing but riskier than email.
+Cards are included at every tier but riskier than email. Safe defaults mitigate risk.
 
 - estimated virtual card fee: about `$0.10` per card
-- if we charge `$2` per additional virtual card, gross margin before support is about `$1.90`
 - one `$15` dispute can wipe out the gross profit from roughly `7-8` cards
+- safe defaults applied at card creation: $500/day spending limit, blocked cash advances + gambling
 
 Conclusion:
 
-- cards should be invite-only early
-- spending limits must be strict
-- merchant/category controls should be narrow
+- cards included from day 1 (the unification IS the product)
+- overall beta access gated by SIGNUP_SECRET (manual invite)
+- spending limits enforced by Stripe's native `spending_controls` at card creation
+- merchant/category controls available and defaults are conservative
 - pass-through fees must be explicit in terms
+- monitor dispute patterns closely in early beta
 
 ## Business Model
 
-### Phase 1 business
+### Phase 1 business (SHIPPED)
 
 The first business is:
 
-- personal managed email accounts for AI agents
-- self-serve onboarding plus clear setup docs
-- OpenClaw integration as the easiest activation path
+- managed email + virtual cards for AI agents under one identity
+- self-serve onboarding via SIGNUP_SECRET invite + Stripe Checkout
+- MCP gateway as the primary activation path (Claude Desktop, any MCP client)
+- OpenClaw integration via outbound webhooks
+- 3 plan tiers: Starter ($19), Personal ($29), Power ($49) — all include email + cards
 
-### Phase 2 business
+### Phase 2 business (NEXT)
 
 The second business is:
 
-- power users with multiple agents
-- paid card beta for trusted users with simple use cases (autonomous within spending limits)
+- power users with multiple agents (Power tier already supports 3)
 - payment receiving beta (agent creates payment links, sends invoices)
 - early teams who started from a personal use case
 
-### Phase 3 business
+### Phase 3 business (FUTURE)
 
 The third business is:
 
-- small teams and startups
+- small teams and startups (team tiers)
 - per-agent identity via Agent Auth Protocol (each agent has its own scoped capabilities)
 - MPP-enabled agents (agents can pay for services on the open web)
 - higher limits
@@ -295,63 +288,52 @@ The third business is:
 
 ## Go-to-Market Plan
 
-### Phase 0: prove the personal story
+### Phase 0: prove the personal story (DONE)
 
-Timeline: weeks 1-2
+- Landing page live, positioned around unification: "One identity. Email. Payments. Full audit trail."
+- MCP / Claude Desktop integration angle prominent
+- Pricing section with 3 tiers, cards at every tier
+- "Request Beta" CTA with email form
 
-- build a clear landing page around personal-agent outcomes
-- show the landlord-email and controlled-purchase examples
-- make OpenClaw setup the first-class demo path
-- recruit 20-30 serious personal AI users for interviews and testing
+### Phase 1: launch Starter, Personal, Power (READY TO DEPLOY)
 
-Exit criteria:
+All billing infrastructure is built. Next steps:
 
-- 10 activated users who connect an agent successfully
-- 5 users who complete a real email task
-- 5 users willing to pay for managed access
-
-### Phase 1: launch Starter and Personal
-
-Timeline: weeks 2-5
-
-- ship managed inbox provisioning
-- ship send/receive email
-- ship basic logs and timeline
-- ship onboarding that feels easy enough for non-infra users
+- deploy to Railway (API + Worker)
+- verify healthcheck, webhook delivery, MCP HTTP in production
+- smoke test with real AgentMail inbox + Stripe test mode card
+- manually invite first 10-20 beta users via SIGNUP_SECRET
+- each user: POST /orgs → Stripe Checkout → create agent → provision inbox + issue card → connect MCP
 
 Exit criteria:
 
 - first paying personal users live
-- at least 10 combined paying Starter and Personal users
+- at least 10 combined paying users across all tiers
 - support load low enough that setup does not require manual founder intervention every time
 
-### Phase 2: launch Personal Actions Beta
+### Phase 2: grow and retain (NEXT)
 
-Timeline: weeks 5-8
-
-- gate access manually
-- allow only low-risk virtual card use cases
-- require explicit spend limits and control settings
-- monitor disputes, support tickets, and failure modes closely
+- monitor card usage patterns, disputes, and support tickets
+- iterate on safe defaults based on real usage
+- add payment receiving (agent creates payment links, sends invoices) if demand appears
+- iterate on MCP tool descriptions based on user feedback
 
 Exit criteria:
 
-- at least 5 trusted paying beta users
+- at least 20 paying users
 - no unacceptable fraud or dispute pattern
-- card workflows are creating real retention, not just demos
+- card + email workflows creating real retention, not just demos
 
-### Phase 3: convert users into teams
-
-Timeline: weeks 8-12
+### Phase 3: convert users into teams (FUTURE)
 
 - add shared workspace features
-- add multiple agents per account
-- add quotas and usage reporting
-- position Team Starter as the upgrade for people bringing the workflow into work
+- add team tiers ($249+)
+- add multiple agents per account (Power tier already supports 3)
+- add quotas and usage reporting dashboard
 
 Exit criteria:
 
-- first 3 Team Starter customers
+- first 3 team customers
 - at least one upgrade path from personal user to team account
 - team revenue becomes a meaningful share of MRR
 
@@ -377,25 +359,30 @@ These protocols are additive. They don't change the product or pricing — they 
 
 ## Product Priorities
 
-### Build now
+### Shipped
 
-- simple signup and managed provisioning
-- OpenClaw connection flow
-- email send/receive
-- event log and basic timeline
-- per-user usage accounting
-- quota enforcement
-- minimal billing and plan enforcement
-- strict policy constraints at provisioning time (spending limits, MCC categories, domain allowlists) — agents act autonomously within bounds
+- signup gate (SIGNUP_SECRET)
+- Stripe Billing (Checkout + Portal + webhook sync)
+- subscription enforcement (402 for inactive)
+- plan-based quotas (agents, inboxes, emails/mo, cards/mo)
+- email send/receive with domain policy enforcement
+- virtual card issuance with safe spending_controls defaults
+- event log and unified timeline
+- MCP gateway (stdio + HTTP/SSE) with polished tool descriptions
+- outbound webhooks (OpenClaw + Hermes compatible)
+- health probe with DB check
+- graceful shutdown
+- structured log context (orgId, keyId)
+- landing page with pricing and MCP integration angle
+- security fixes (state guard, ephemeral key, DNS rebinding, idempotency key scoping)
 
 ### Build after traction
 
-- richer workspace/team controls
-- polished admin panel
-- more integrations
-- broader MCP surface
-- Agent Auth Protocol (per-agent identity + scoped capabilities)
 - payment receiving (Stripe Payment Links + Invoicing for agents)
+- richer workspace/team controls + team tiers
+- Agent Auth Protocol (per-agent identity + scoped capabilities)
+- Sentry error reporting
+- polished admin panel
 - dedicated or BYO provider support for larger customers
 
 ### Defer
@@ -404,6 +391,8 @@ These protocols are additive. They don't change the product or pricing — they 
 - voice
 - SMS
 - physical cards
+- KYC / real-time Stripe authorization (Stripe spending_controls sufficient for beta)
+- auth hardening (key expiry, HMAC signing, rate limiting)
 - agent-to-agent delegation chains
 - generic workflow builder
 - enterprise-only compliance work before demand exists

@@ -21,7 +21,9 @@ export function registerTools(
 		registerAgentTools(server, fastify, session);
 		registerResourceTools(server, fastify, session);
 		registerEmailTools(server, fastify, session);
-		registerPaymentTools(server, fastify, session);
+		if (fastify.stripeAdapter) {
+			registerPaymentTools(server, fastify, session);
+		}
 		registerEventTools(server, fastify, session);
 	}
 }

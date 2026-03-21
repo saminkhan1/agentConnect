@@ -10,6 +10,10 @@ import { resourceResponseSchema } from "./resources";
 
 const agentParamsSchema = z.object({ id: z.string().min(1) });
 const replyToSchema = z.union([z.email(), z.array(z.email()).min(1)]);
+const idempotencyKeySchema = z
+	.string()
+	.trim()
+	.min(1, "idempotency_key is required");
 
 export const sendEmailParamsSchema = agentParamsSchema;
 
@@ -22,7 +26,7 @@ export const replyEmailBodySchema = z.object({
 	cc: z.array(z.email()).optional(),
 	bcc: z.array(z.email()).optional(),
 	reply_to: replyToSchema.optional(),
-	idempotency_key: z.string().min(1).optional(),
+	idempotency_key: idempotencyKeySchema,
 });
 
 export const replyEmailResponseSchema = z.object({
@@ -37,7 +41,7 @@ export const sendEmailBodySchema = z.object({
 	cc: z.array(z.email()).optional(),
 	bcc: z.array(z.email()).optional(),
 	reply_to: replyToSchema.optional(),
-	idempotency_key: z.string().min(1).optional(),
+	idempotency_key: idempotencyKeySchema,
 });
 
 export const sendEmailResponseSchema = z.object({ event: eventResponseSchema });

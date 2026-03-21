@@ -294,6 +294,56 @@ void test("Subscription enforcement skips billing routes", async () => {
 	}
 });
 
+void test("Billing checkout rejects service keys", async () => {
+	const server = await buildServer();
+	const { authorizationHeader, restore } = await installAuthApiKey(server, {
+		keyType: "service",
+	});
+
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/billing/checkout",
+			headers: { authorization: authorizationHeader },
+			payload: {
+				plan_tier: "starter",
+				success_url: "https://example.com/success",
+				cancel_url: "https://example.com/cancel",
+			},
+		});
+
+		assert.equal(response.statusCode, 403);
+		assert.equal(response.json<{ message: string }>().message, "Forbidden");
+	} finally {
+		restore();
+		await server.close();
+	}
+});
+
+void test("Billing portal rejects service keys", async () => {
+	const server = await buildServer();
+	const { authorizationHeader, restore } = await installAuthApiKey(server, {
+		keyType: "service",
+	});
+
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/billing/portal",
+			headers: { authorization: authorizationHeader },
+			payload: {
+				return_url: "https://example.com/account",
+			},
+		});
+
+		assert.equal(response.statusCode, 403);
+		assert.equal(response.json<{ message: string }>().message, "Forbidden");
+	} finally {
+		restore();
+		await server.close();
+	}
+});
+
 void test("Subscription enforcement does not activate when SIGNUP_SECRET is not set", async () => {
 	const originalEnv = process.env.SIGNUP_SECRET;
 	delete process.env.SIGNUP_SECRET;

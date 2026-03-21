@@ -44,6 +44,7 @@ const resourceRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
 					401: errorResponseSchema,
 					403: errorResponseSchema,
 					404: errorResponseSchema,
+					422: errorResponseSchema,
 					500: errorResponseSchema,
 				},
 			},
@@ -60,6 +61,11 @@ const resourceRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
 			}
 
 			if (request.body.type === "card" && request.body.provider === "stripe") {
+				if (!server.stripeAdapter) {
+					return reply.code(422).send({
+						message: "Card capabilities are not currently available",
+					});
+				}
 				return reply.code(400).send({
 					message:
 						"Stripe cards must be issued via POST /agents/:id/actions/issue_card",

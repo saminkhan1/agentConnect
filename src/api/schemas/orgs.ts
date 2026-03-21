@@ -40,3 +40,25 @@ export const createServiceApiKeyResponseSchema = z.object({
 		keyType: z.literal("service"),
 	}),
 });
+
+export const rotateRootKeyParamsSchema = z.object({
+	id: z.string().trim().min(1),
+});
+
+export const rotateRootKeyResponseSchema = z.object({
+	apiKey: apiKeyResponseSchema.extend({
+		keyType: z.literal("root"),
+	}),
+	previousKeyId: z.string(),
+	message: z.string(),
+});
+
+export const revokeApiKeyParamsSchema = z.object({
+	id: z.string().trim().min(1),
+	keyId: z.string().trim().min(1),
+});
+
+export const revokeApiKeyResponseSchema = z.object({
+	revokedKeyId: z.string(),
+	message: z.string(),
+});

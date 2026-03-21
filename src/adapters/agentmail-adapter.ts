@@ -4,6 +4,7 @@ import { EVENT_TYPES, type EventType } from "../domain/events.js";
 import type {
 	DeprovisionResult,
 	ParsedWebhookEvent,
+	ProviderActionOptions,
 	ProviderAdapter,
 	ProvisionResult,
 	Resource,
@@ -257,16 +258,22 @@ export class AgentMailAdapter implements ProviderAdapter {
 		resource: Resource,
 		action: string,
 		payload: Record<string, unknown>,
+		options?: ProviderActionOptions,
 	): Promise<Record<string, unknown>> {
 		const inboxId = resource.providerRef;
 		if (!inboxId) {
 			throw new Error("Resource has no providerRef");
 		}
 
+		const requestOptions = options?.abortSignal
+			? { abortSignal: options.abortSignal }
+			: undefined;
+
 		if (action === "send_email") {
 			const result = await this.client.inboxes.messages.send(
 				inboxId,
 				buildSendMessageRequest(payload),
+				requestOptions,
 			);
 			return serializeAgentMailValue(serialization.SendMessageResponse, result);
 		}
@@ -277,6 +284,7 @@ export class AgentMailAdapter implements ProviderAdapter {
 				inboxId,
 				messageId,
 				request,
+				requestOptions,
 			);
 			return serializeAgentMailValue(serialization.SendMessageResponse, result);
 		}
@@ -285,6 +293,7 @@ export class AgentMailAdapter implements ProviderAdapter {
 			const result = await this.client.inboxes.messages.get(
 				inboxId,
 				payload.message_id as string,
+				requestOptions,
 			);
 			return serializeAgentMailValue(serialization.Message, result);
 		}

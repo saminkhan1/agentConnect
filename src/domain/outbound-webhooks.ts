@@ -415,7 +415,7 @@ async function assertSafeHostname(
 ) {
 	if (hostname.length === 0) {
 		throw new AppError(
-			"OUTBOUND_WEBHOOK_URL_INVALID",
+			"OUTBOUND_WEBHOOK_URL_HOSTNAME_REQUIRED",
 			400,
 			"Outbound webhook URL hostname is required",
 		);
@@ -430,7 +430,7 @@ async function assertSafeHostname(
 
 	if (net.isIP(hostname) !== 0) {
 		throw new AppError(
-			"OUTBOUND_WEBHOOK_URL_INVALID",
+			"OUTBOUND_WEBHOOK_URL_IP_LITERAL_BLOCKED",
 			400,
 			"IP literal webhook targets must be explicitly allowlisted",
 		);
@@ -438,7 +438,7 @@ async function assertSafeHostname(
 
 	if (isLocalHostname(hostname)) {
 		throw new AppError(
-			"OUTBOUND_WEBHOOK_URL_INVALID",
+			"OUTBOUND_WEBHOOK_URL_LOCAL_TARGET",
 			400,
 			"Local webhook targets must be explicitly allowlisted",
 		);
@@ -449,7 +449,7 @@ async function assertSafeHostname(
 		resolvedAddresses = await resolveHostname(hostname);
 	} catch {
 		throw new AppError(
-			"OUTBOUND_WEBHOOK_URL_INVALID",
+			"OUTBOUND_WEBHOOK_URL_DNS_UNRESOLVED",
 			400,
 			"Outbound webhook URL hostname could not be resolved",
 		);
@@ -457,7 +457,7 @@ async function assertSafeHostname(
 
 	if (resolvedAddresses.length === 0) {
 		throw new AppError(
-			"OUTBOUND_WEBHOOK_URL_INVALID",
+			"OUTBOUND_WEBHOOK_URL_DNS_UNRESOLVED",
 			400,
 			"Outbound webhook URL hostname could not be resolved",
 		);
@@ -467,11 +467,19 @@ async function assertSafeHostname(
 		resolvedAddresses.some((entry) => isPrivateResolvedAddress(entry.address))
 	) {
 		throw new AppError(
-			"OUTBOUND_WEBHOOK_URL_INVALID",
+			"OUTBOUND_WEBHOOK_URL_PRIVATE_TARGET",
 			400,
 			"Outbound webhook targets must not resolve to private or local addresses",
 		);
 	}
+}
+
+function shouldRetryHostnameValidation(error: unknown) {
+	if (!(error instanceof AppError)) {
+		return true;
+	}
+
+	return error.code === "OUTBOUND_WEBHOOK_URL_DNS_UNRESOLVED";
 }
 
 export async function validateOutboundWebhookUrl(
@@ -1032,6 +1040,7 @@ export class OutboundWebhookWorker {
 
 		// Re-validate hostname at delivery time to prevent DNS rebinding attacks.
 		// The subscription URL was validated at creation, but DNS could have changed.
+		let outcome: DeliveryAttemptOutcome | null = null;
 		try {
 			const deliveryUrl = new URL(request.url);
 			await assertSafeHostname(
@@ -1040,48 +1049,71 @@ export class OutboundWebhookWorker {
 				this.options.nodeEnv ?? "production",
 				this.options.resolveHostname ?? resolveWebhookHostname,
 			);
-		} catch {
-			const now = this.getNow();
-			await db
-				.update(webhookDeliveries)
-				.set({
-					attemptCount: attemptNumber,
-					lastStatus: "failed",
-					lastResponseBody:
-						"DNS rebinding detected: delivery URL resolved to private address",
-					updatedAt: now,
-				})
-				.where(eq(webhookDeliveries.id, delivery.id));
-			return;
-		}
-
-		let outcome: DeliveryAttemptOutcome;
-		let retryAfterHeader: string | null = null;
-		try {
-			const response = await fetch(request.url, {
-				method: "POST",
-				headers: request.headers,
-				body: request.body,
-				redirect: "error",
-				signal: AbortSignal.timeout(this.getRequestTimeoutMs()),
-			});
-
-			outcome = {
-				kind: "response",
-				statusCode: response.status,
-				responseBody: truncateResponseBody(
-					await readResponseBodyBounded(response),
-				),
-			};
-			retryAfterHeader = response.headers.get("retry-after");
 		} catch (error) {
+			if (!shouldRetryHostnameValidation(error)) {
+				const now = this.getNow();
+				await db
+					.update(webhookDeliveries)
+					.set({
+						attemptCount: attemptNumber,
+						lastStatus: "failed",
+						lastResponseBody:
+							error instanceof Error
+								? error.message
+								: "DNS rebinding detected: delivery URL resolved to private address",
+						lastRequestHeaders: requestHeaders,
+						lastPayload: request.payload,
+						lastError: {
+							kind: "hostname_validation",
+							message:
+								error instanceof Error
+									? error.message
+									: "Outbound webhook target is no longer safe",
+						},
+						lockedAt: null,
+						updatedAt: now,
+					})
+					.where(eq(webhookDeliveries.id, delivery.id));
+				return;
+			}
+
 			outcome = {
 				kind: "network_error",
 				message:
 					error instanceof Error
 						? error.message
-						: "Unknown outbound webhook error",
+						: "Outbound webhook hostname could not be revalidated",
 			};
+		}
+
+		let retryAfterHeader: string | null = null;
+		if (outcome === null) {
+			try {
+				const response = await fetch(request.url, {
+					method: "POST",
+					headers: request.headers,
+					body: request.body,
+					redirect: "error",
+					signal: AbortSignal.timeout(this.getRequestTimeoutMs()),
+				});
+
+				outcome = {
+					kind: "response",
+					statusCode: response.status,
+					responseBody: truncateResponseBody(
+						await readResponseBodyBounded(response),
+					),
+				};
+				retryAfterHeader = response.headers.get("retry-after");
+			} catch (error) {
+				outcome = {
+					kind: "network_error",
+					message:
+						error instanceof Error
+							? error.message
+							: "Unknown outbound webhook error",
+				};
+			}
 		}
 
 		if (

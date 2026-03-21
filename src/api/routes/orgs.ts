@@ -3,17 +3,23 @@ import crypto from "node:crypto";
 import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
 import { getServerConfig } from "../../config";
 import { generateApiKeyMaterial } from "../../domain/api-keys";
-import { requireScope } from "../../plugins/auth";
+import { requireKeyType, requireScope } from "../../plugins/auth";
 import { errorResponseSchema } from "../schemas/common";
 import {
 	createApiKeyParamsSchema,
 	createOrgBodySchema,
 	createOrgResponseSchema,
 	createServiceApiKeyResponseSchema,
+	revokeApiKeyParamsSchema,
+	revokeApiKeyResponseSchema,
+	rotateRootKeyParamsSchema,
+	rotateRootKeyResponseSchema,
 } from "../schemas/orgs";
 
 const orgRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
 	const config = getServerConfig(process.env);
+	const apiKeyLifecycleLock = (orgId: string) =>
+		`org:${orgId}:api-key-lifecycle`;
 
 	server.post(
 		"/orgs",
@@ -127,6 +133,154 @@ const orgRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
 			});
 		},
 	);
+	server.post(
+		"/orgs/:id/api-keys/rotate-root",
+		{
+			preHandler: [requireScope("api_keys:write"), requireKeyType("root")],
+			schema: {
+				params: rotateRootKeyParamsSchema,
+				response: {
+					200: rotateRootKeyResponseSchema,
+					401: errorResponseSchema,
+					403: errorResponseSchema,
+					404: errorResponseSchema,
+				},
+			},
+		},
+		async (request, reply) => {
+			const auth = request.auth;
+			if (!auth) {
+				return reply.code(401).send({ message: "Unauthorized" });
+			}
+
+			if (auth.org_id !== request.params.id) {
+				return reply.code(403).send({ message: "Forbidden" });
+			}
+
+			const org = await server.systemDal.getOrg(request.params.id);
+			if (!org) {
+				return reply.code(404).send({ message: "Organization not found" });
+			}
+
+			const dal = request.dalFactory(org.id);
+
+			return await server.withAdvisoryLock(
+				apiKeyLifecycleLock(org.id),
+				async () => {
+					const currentKey = await dal.apiKeys.findById(auth.key_id);
+					if (
+						!currentKey ||
+						currentKey.isRevoked ||
+						currentKey.keyType !== "root"
+					) {
+						return reply.code(401).send({ message: "Unauthorized" });
+					}
+
+					const newRootKey = await generateApiKeyMaterial();
+					const createdKey = await dal.apiKeys.insert({
+						id: newRootKey.id,
+						keyType: "root",
+						keyHash: newRootKey.keyHash,
+					});
+
+					return reply.code(200).send({
+						apiKey: {
+							id: createdKey.id,
+							orgId: createdKey.orgId,
+							keyType: "root" as const,
+							key: newRootKey.plaintextKey,
+							createdAt: createdKey.createdAt.toISOString(),
+						},
+						previousKeyId: currentKey.id,
+						message:
+							"New root key issued. Keep your current root key until the new key is safely stored, then revoke the previous key via POST /orgs/:id/api-keys/:keyId/revoke.",
+					});
+				},
+			);
+		},
+	);
+
+	server.post(
+		"/orgs/:id/api-keys/:keyId/revoke",
+		{
+			preHandler: [requireScope("api_keys:write"), requireKeyType("root")],
+			schema: {
+				params: revokeApiKeyParamsSchema,
+				response: {
+					200: revokeApiKeyResponseSchema,
+					401: errorResponseSchema,
+					403: errorResponseSchema,
+					404: errorResponseSchema,
+					409: errorResponseSchema,
+				},
+			},
+		},
+		async (request, reply) => {
+			const auth = request.auth;
+			if (!auth) {
+				return reply.code(401).send({ message: "Unauthorized" });
+			}
+
+			if (auth.org_id !== request.params.id) {
+				return reply.code(403).send({ message: "Forbidden" });
+			}
+
+			const org = await server.systemDal.getOrg(request.params.id);
+			if (!org) {
+				return reply.code(404).send({ message: "Organization not found" });
+			}
+
+			const dal = request.dalFactory(org.id);
+
+			return await server.withAdvisoryLock(
+				apiKeyLifecycleLock(org.id),
+				async () => {
+					const actingKey = await dal.apiKeys.findById(auth.key_id);
+					if (
+						!actingKey ||
+						actingKey.isRevoked ||
+						actingKey.keyType !== "root"
+					) {
+						return reply.code(401).send({ message: "Unauthorized" });
+					}
+
+					const targetKey = await dal.apiKeys.findById(request.params.keyId);
+					if (!targetKey) {
+						return reply.code(404).send({ message: "API key not found" });
+					}
+
+					if (targetKey.isRevoked) {
+						return reply.code(200).send({
+							revokedKeyId: targetKey.id,
+							message: "API key already revoked",
+						});
+					}
+
+					if (targetKey.keyType === "root") {
+						const activeRootKeys = (await dal.apiKeys.findMany()).filter(
+							(key) => key.keyType === "root" && !key.isRevoked,
+						);
+						if (activeRootKeys.length <= 1) {
+							return reply.code(409).send({
+								message: "At least one active root key must remain",
+							});
+						}
+					}
+
+					const revokedKey = await dal.apiKeys.revokeById(request.params.keyId);
+					if (!revokedKey) {
+						return reply.code(404).send({ message: "API key not found" });
+					}
+
+					return reply.code(200).send({
+						revokedKeyId: revokedKey.id,
+						message: "API key revoked",
+					});
+				},
+			);
+		},
+	);
+
 	done();
 };
 

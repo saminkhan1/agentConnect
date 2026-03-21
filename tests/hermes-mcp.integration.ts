@@ -32,6 +32,10 @@ type ToolTextResult = {
 	isError?: boolean;
 };
 
+const hasStripeAdapterConfig = Boolean(
+	process.env.STRIPE_SECRET_KEY && process.env.STRIPE_WEBHOOK_SECRET,
+);
+
 function setEnv(overrides: Record<string, string | undefined>) {
 	const previous = new Map<string, string | undefined>();
 	for (const [key, value] of Object.entries(overrides)) {
@@ -193,9 +197,13 @@ void test("integration: Hermes-style HTTP MCP bootstrap, scoped discovery, tool 
 		const rootTools = await rootClient.listTools();
 		const rootToolNames = rootTools.tools.map((tool) => tool.name);
 		assert.ok(rootToolNames.includes("agentinfra.api_keys.create_service"));
-		assert.ok(
-			rootToolNames.includes("agentinfra.payments.create_card_details_session"),
-		);
+		if (hasStripeAdapterConfig) {
+			assert.ok(
+				rootToolNames.includes(
+					"agentinfra.payments.create_card_details_session",
+				),
+			);
+		}
 		assert.strictEqual(
 			new Set(
 				rootToolNames.map((toolName) =>
@@ -228,13 +236,15 @@ void test("integration: Hermes-style HTTP MCP bootstrap, scoped discovery, tool 
 		const serviceToolNames = serviceTools.tools.map((tool) => tool.name);
 		assert.ok(serviceToolNames.includes("agentinfra.agents.create"));
 		assert.ok(serviceToolNames.includes("agentinfra.email.send"));
-		assert.ok(serviceToolNames.includes("agentinfra.payments.issue_card"));
+		if (hasStripeAdapterConfig) {
+			assert.ok(serviceToolNames.includes("agentinfra.payments.issue_card"));
+			assert.ok(
+				!serviceToolNames.includes(
+					"agentinfra.payments.create_card_details_session",
+				),
+			);
+		}
 		assert.ok(!serviceToolNames.includes("agentinfra.api_keys.create_service"));
-		assert.ok(
-			!serviceToolNames.includes(
-				"agentinfra.payments.create_card_details_session",
-			),
-		);
 
 		const createAgentResult = (await serviceClient.callTool({
 			name: "agentinfra.agents.create",
@@ -369,82 +379,84 @@ void test("integration: Hermes-style HTTP MCP bootstrap, scoped discovery, tool 
 			/NOT_FOUND: Agent not found/,
 		);
 
-		const restoreResourceManager = installResourceManagerMock(
-			requireServer(server),
-			{
-				provision: () => {
+		if (hasStripeAdapterConfig) {
+			const restoreResourceManager = installResourceManagerMock(
+				requireServer(server),
+				{
+					provision: () => {
+						return Promise.resolve({
+							resource: buildCardResourceRecord({
+								id: `res_card_${crypto.randomUUID()}`,
+								orgId: orgBootstrap.org_id,
+								agentId: createdAgent.agent.id,
+								config: {
+									cardholder_id: "ich_test",
+									last4: "4242",
+									exp_month: 12,
+									exp_year: 2027,
+									currency: "usd",
+								},
+							}),
+						});
+					},
+				},
+			);
+			const restoreStripe = installStripeAdapterMock(requireServer(server), {});
+			const restoreEventWriter = installEventWriterMock(requireServer(server), {
+				writeEvent: () => {
+					const fakeCardResource = buildCardResourceRecord({
+						id: "res_card_hermes",
+						orgId: orgBootstrap.org_id,
+						agentId: createdAgent.agent.id,
+						config: {
+							cardholder_id: "ich_test",
+							last4: "4242",
+							exp_month: 12,
+							exp_year: 2027,
+							currency: "usd",
+						},
+					});
 					return Promise.resolve({
-						resource: buildCardResourceRecord({
-							id: `res_card_${crypto.randomUUID()}`,
+						wasCreated: true,
+						event: buildEventRecord({
 							orgId: orgBootstrap.org_id,
 							agentId: createdAgent.agent.id,
-							config: {
-								cardholder_id: "ich_test",
-								last4: "4242",
-								exp_month: 12,
-								exp_year: 2027,
-								currency: "usd",
+							resourceId: fakeCardResource.id,
+							provider: "stripe",
+							eventType: "payment.card.issued",
+							data: {
+								card_id: fakeCardResource.providerRef ?? fakeCardResource.id,
 							},
 						}),
 					});
 				},
-			},
-		);
-		const restoreStripe = installStripeAdapterMock(requireServer(server), {});
-		const restoreEventWriter = installEventWriterMock(requireServer(server), {
-			writeEvent: () => {
-				const fakeCardResource = buildCardResourceRecord({
-					id: "res_card_hermes",
-					orgId: orgBootstrap.org_id,
-					agentId: createdAgent.agent.id,
-					config: {
-						cardholder_id: "ich_test",
-						last4: "4242",
-						exp_month: 12,
-						exp_year: 2027,
+			});
+
+			try {
+				const issueCardResult = (await serviceClient.callTool({
+					name: "agentinfra.payments.issue_card",
+					arguments: {
+						agent_id: createdAgent.agent.id,
+						cardholder_name: "Hermes Agent",
+						billing_address: {
+							line1: "123 Main St",
+							city: "New York",
+							postal_code: "10001",
+							country: "US",
+						},
 						currency: "usd",
 					},
-				});
-				return Promise.resolve({
-					wasCreated: true,
-					event: buildEventRecord({
-						orgId: orgBootstrap.org_id,
-						agentId: createdAgent.agent.id,
-						resourceId: fakeCardResource.id,
-						provider: "stripe",
-						eventType: "payment.card.issued",
-						data: {
-							card_id: fakeCardResource.providerRef ?? fakeCardResource.id,
-						},
-					}),
-				});
-			},
-		});
-
-		try {
-			const issueCardResult = (await serviceClient.callTool({
-				name: "agentinfra.payments.issue_card",
-				arguments: {
-					agent_id: createdAgent.agent.id,
-					cardholder_name: "Hermes Agent",
-					billing_address: {
-						line1: "123 Main St",
-						city: "New York",
-						postal_code: "10001",
-						country: "US",
-					},
-					currency: "usd",
-				},
-			})) as ToolTextResult;
-			const cardContent = issueCardResult.structuredContent as {
-				card: { last4: string; currency: string };
-			};
-			assert.strictEqual(cardContent.card.last4, "4242");
-			assert.strictEqual(cardContent.card.currency, "usd");
-		} finally {
-			restoreEventWriter();
-			restoreStripe();
-			restoreResourceManager();
+				})) as ToolTextResult;
+				const cardContent = issueCardResult.structuredContent as {
+					card: { last4: string; currency: string };
+				};
+				assert.strictEqual(cardContent.card.last4, "4242");
+				assert.strictEqual(cardContent.card.currency, "usd");
+			} finally {
+				restoreEventWriter();
+				restoreStripe();
+				restoreResourceManager();
+			}
 		}
 
 		await anonTransport.close();

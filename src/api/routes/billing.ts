@@ -1,6 +1,6 @@
 import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
 import { z } from "zod";
-import { requireScope } from "../../plugins/auth";
+import { requireKeyType } from "../../plugins/auth";
 import { errorResponseSchema } from "../schemas/common";
 
 const checkoutBodySchema = z.object({
@@ -28,7 +28,7 @@ const billingRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
 	server.post(
 		"/billing/checkout",
 		{
-			preHandler: [requireScope("agents:read")],
+			preHandler: [requireKeyType("root")],
 			schema: {
 				body: checkoutBodySchema,
 				response: {
@@ -69,7 +69,7 @@ const billingRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
 	server.post(
 		"/billing/portal",
 		{
-			preHandler: [requireScope("agents:read")],
+			preHandler: [requireKeyType("root")],
 			schema: {
 				body: portalBodySchema,
 				response: {

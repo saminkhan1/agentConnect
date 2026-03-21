@@ -19,6 +19,10 @@ export type ParsedWebhookEvent = Omit<WriteEventInput, "orgId" | "agentId"> & {
 	providerOrgId?: string; // provider-side org identifier for tenant-scoped lookup
 };
 
+export type ProviderActionOptions = {
+	abortSignal?: AbortSignal;
+};
+
 export interface ProviderAdapter {
 	readonly providerName: string;
 	provision(
@@ -30,6 +34,7 @@ export interface ProviderAdapter {
 		resource: Resource,
 		action: string,
 		payload: Record<string, unknown>,
+		options?: ProviderActionOptions,
 	): Promise<Record<string, unknown>>;
 	verifyWebhook(
 		rawBody: Buffer,

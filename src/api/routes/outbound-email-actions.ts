@@ -156,17 +156,15 @@ export async function executeOutboundEmailAction<
 
 		let actionResult: Record<string, unknown>;
 		try {
-			// Note: withTimeout's AbortSignal is intentionally not passed to the adapter.
-			// If the timeout fires, the adapter call continues in the background but the
-			// response path treats it as an error. This is safe because all email actions
-			// are idempotent — a timed-out send that actually succeeds will be reconciled
-			// on the next replay via the idempotency key.
+			// Outbound email actions require idempotency keys and forward the timeout
+			// AbortSignal to AgentMail so callers can safely retry after timeouts.
 			actionResult = await withTimeout(
-				() =>
+				(signal) =>
 					adapter.performAction(
 						emailResource,
 						config.actionType,
 						config.buildAdapterPayload(prepared.requestData),
+						{ abortSignal: signal },
 					),
 				ADAPTER_TIMEOUT_MS,
 			);
@@ -338,11 +336,12 @@ export async function executeOutboundEmailAction<
 		let providerResponse: Record<string, unknown>;
 		try {
 			providerResponse = await withTimeout(
-				() =>
+				(signal) =>
 					adapter.performAction(
 						emailResource,
 						config.actionType,
 						config.buildAdapterPayload(dispatchRequestData),
+						{ abortSignal: signal },
 					),
 				ADAPTER_TIMEOUT_MS,
 			);

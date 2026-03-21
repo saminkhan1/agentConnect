@@ -32,7 +32,10 @@ export function registerEmailTools(
 				reply_to: replyToSchema
 					.optional()
 					.describe("Reply-to address or addresses"),
-				idempotency_key: z.string().optional().describe("Idempotency key"),
+				idempotency_key: z
+					.string()
+					.min(1)
+					.describe("Required idempotency key for safe retries"),
 			}),
 		},
 		async ({
@@ -48,12 +51,16 @@ export function registerEmailTools(
 			authorization,
 		}) => {
 			const authHeader = resolveToolAuthorization(session, authorization);
-			const body: Record<string, unknown> = { to, subject, text };
+			const body: Record<string, unknown> = {
+				to,
+				subject,
+				text,
+				idempotency_key,
+			};
 			if (html !== undefined) body.html = html;
 			if (cc !== undefined) body.cc = cc;
 			if (bcc !== undefined) body.bcc = bcc;
 			if (reply_to !== undefined) body.reply_to = reply_to;
-			if (idempotency_key !== undefined) body.idempotency_key = idempotency_key;
 
 			const data = await injectOrThrow(fastify, {
 				method: "POST",
@@ -83,7 +90,10 @@ export function registerEmailTools(
 				reply_to: replyToSchema
 					.optional()
 					.describe("Reply-to address or addresses"),
-				idempotency_key: z.string().optional().describe("Idempotency key"),
+				idempotency_key: z
+					.string()
+					.min(1)
+					.describe("Required idempotency key for safe retries"),
 			}),
 		},
 		async ({
@@ -98,12 +108,15 @@ export function registerEmailTools(
 			authorization,
 		}) => {
 			const authHeader = resolveToolAuthorization(session, authorization);
-			const body: Record<string, unknown> = { message_id, text };
+			const body: Record<string, unknown> = {
+				message_id,
+				text,
+				idempotency_key,
+			};
 			if (html !== undefined) body.html = html;
 			if (cc !== undefined) body.cc = cc;
 			if (bcc !== undefined) body.bcc = bcc;
 			if (reply_to !== undefined) body.reply_to = reply_to;
-			if (idempotency_key !== undefined) body.idempotency_key = idempotency_key;
 
 			const data = await injectOrThrow(fastify, {
 				method: "POST",

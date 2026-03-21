@@ -59,6 +59,113 @@ function buildIssueCardPayload(overrides?: Record<string, unknown>) {
 	};
 }
 
+// ---------------------------------------------------------------------------
+// Card capability guard — 422 when Stripe adapter is absent
+// ---------------------------------------------------------------------------
+
+void test("POST /agents/:id/actions/issue_card returns 422 when Stripe adapter is not configured", async () => {
+	const server = await buildServer();
+	const { authorizationHeader, restore } = await installAuthApiKey(server);
+	const restoreAgents = installAgentsDalMock({
+		findById: () => Promise.resolve(buildAgentRecord()),
+	});
+
+	const originalAdapter = server.stripeAdapter;
+	server.stripeAdapter = undefined;
+
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/agents/agt_123/actions/issue_card",
+			headers: { authorization: authorizationHeader },
+			payload: buildIssueCardPayload(),
+		});
+
+		assert.strictEqual(response.statusCode, 422);
+		assert.match(
+			response.json<{ message: string }>().message,
+			/card capabilities/i,
+		);
+	} finally {
+		server.stripeAdapter = originalAdapter;
+		restoreAgents();
+		restore();
+		await server.close();
+	}
+});
+
+void test("POST /agents/:id/actions/create_card_details_session returns 422 when Stripe adapter is not configured", async () => {
+	const server = await buildServer();
+	const { authorizationHeader, restore } = await installAuthApiKey(server, {
+		keyType: "root",
+	});
+	const agent = buildAgentRecord();
+	const resource = buildCardResourceRecord();
+	const restoreAgents = installAgentsDalMock({
+		findById: () => Promise.resolve(agent),
+	});
+	const restoreResources = installResourcesDalMock({
+		findById: () => Promise.resolve(resource),
+	});
+
+	const originalAdapter = server.stripeAdapter;
+	server.stripeAdapter = undefined;
+
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/agents/agt_123/actions/create_card_details_session",
+			headers: { authorization: authorizationHeader },
+			payload: { resource_id: "res_card_123", nonce: "nonce_123" },
+		});
+
+		assert.strictEqual(response.statusCode, 422);
+		assert.match(
+			response.json<{ message: string }>().message,
+			/card capabilities/i,
+		);
+	} finally {
+		server.stripeAdapter = originalAdapter;
+		restoreResources();
+		restoreAgents();
+		restore();
+		await server.close();
+	}
+});
+
+void test("POST /agents/:id/resources returns 422 for card type when Stripe adapter is not configured", async () => {
+	const server = await buildServer();
+	const { authorizationHeader, restore } = await installAuthApiKey(server);
+	const restoreAgents = installAgentsDalMock({
+		findById: () => Promise.resolve(buildAgentRecord()),
+	});
+
+	const originalAdapter = server.stripeAdapter;
+	server.stripeAdapter = undefined;
+
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/agents/agt_123/resources",
+			headers: { authorization: authorizationHeader },
+			payload: { type: "card", provider: "stripe", config: {} },
+		});
+
+		assert.strictEqual(response.statusCode, 422);
+		assert.match(
+			response.json<{ message: string }>().message,
+			/card capabilities/i,
+		);
+	} finally {
+		server.stripeAdapter = originalAdapter;
+		restoreAgents();
+		restore();
+		await server.close();
+	}
+});
+
+// ---------------------------------------------------------------------------
+
 void test("POST /agents/:id/actions/issue_card rejects missing explicit Stripe cardholder fields", async () => {
 	const server = await buildServer();
 	const { authorizationHeader, restore } = await installAuthApiKey(server);

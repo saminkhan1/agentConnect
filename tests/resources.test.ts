@@ -237,6 +237,10 @@ void test("POST /agents/:id/resources returns 400 for Stripe card provisioning",
 		},
 	});
 
+	// Mock stripeAdapter as present so the 400 redirect fires instead of 422
+	const originalAdapter = server.stripeAdapter;
+	server.stripeAdapter = {} as typeof server.stripeAdapter;
+
 	try {
 		const response = await server.inject({
 			method: "POST",
@@ -250,6 +254,7 @@ void test("POST /agents/:id/resources returns 400 for Stripe card provisioning",
 		const payload = JSON.parse(response.payload) as { message: string };
 		assert.ok(payload.message.includes("/agents/:id/actions/issue_card"));
 	} finally {
+		server.stripeAdapter = originalAdapter;
 		restore();
 		restoreAgents();
 		restoreResourceManager();
@@ -285,6 +290,46 @@ void test("POST /agents/:id/resources returns 201 with provisioned resource", as
 		};
 		assert.strictEqual(payload.resource.id, "res_123");
 		assert.strictEqual(payload.resource.state, "active");
+	} finally {
+		restore();
+		restoreAgents();
+		restoreResourceManager();
+		await server.close();
+	}
+});
+
+void test("POST /agents/:id/resources allows non-Stripe card providers", async () => {
+	const server = await buildServer();
+	const { authorizationHeader, restore } = await installAuthApiKey(server);
+	const agent = buildAgentRecord();
+	const resource = buildResourceRecord({ type: "card", provider: "mock" });
+	let provisionCalls = 0;
+
+	const restoreAgents = installAgentsDalMock({
+		findById: (_id) => Promise.resolve(agent),
+	});
+	const restoreResourceManager = installResourceManagerMock(server, {
+		provision: (_dal, _agentId, _type, _provider, _config) => {
+			provisionCalls += 1;
+			return Promise.resolve({ resource });
+		},
+	});
+
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/agents/agt_123/resources",
+			headers: { authorization: authorizationHeader },
+			payload: { type: "card", provider: "mock", config: {} },
+		});
+
+		assert.strictEqual(response.statusCode, 201);
+		assert.strictEqual(provisionCalls, 1);
+		const payload = JSON.parse(response.payload) as {
+			resource: { type: string; provider: string };
+		};
+		assert.strictEqual(payload.resource.type, "card");
+		assert.strictEqual(payload.resource.provider, "mock");
 	} finally {
 		restore();
 		restoreAgents();

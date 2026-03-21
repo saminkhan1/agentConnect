@@ -3,6 +3,7 @@ import { EVENT_TYPES } from "../domain/events.js";
 import type {
 	DeprovisionResult,
 	ParsedWebhookEvent,
+	ProviderActionOptions,
 	ProviderAdapter,
 	ProvisionResult,
 	Resource,
@@ -324,6 +325,7 @@ export class StripeAdapter implements ProviderAdapter {
 		_resource: Resource,
 		action: string,
 		_payload: Record<string, unknown>,
+		_options?: ProviderActionOptions,
 	): Promise<Record<string, unknown>> {
 		return Promise.reject(
 			new Error(`Unsupported action for stripe card resource: ${action}`),
