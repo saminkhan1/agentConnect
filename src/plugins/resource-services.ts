@@ -1,45 +1,50 @@
-import type { FastifyPluginCallback } from 'fastify';
-import fp from 'fastify-plugin';
+import type { FastifyPluginCallback } from "fastify";
+import fp from "fastify-plugin";
 
-import { AgentMailAdapter } from '../adapters/agentmail-adapter';
-import { MockAdapter } from '../adapters/mock-adapter';
-import type { ProviderAdapter } from '../adapters/provider-adapter';
-import { StripeAdapter } from '../adapters/stripe-adapter';
-import { getServerConfig } from '../config';
-import { ResourceManager } from '../domain/resource-manager';
+import { AgentMailAdapter } from "../adapters/agentmail-adapter";
+import { MockAdapter } from "../adapters/mock-adapter";
+import type { ProviderAdapter } from "../adapters/provider-adapter";
+import { StripeAdapter } from "../adapters/stripe-adapter";
+import { getServerConfig } from "../config";
+import { ResourceManager } from "../domain/resource-manager";
 
-declare module 'fastify' {
-  interface FastifyInstance {
-    resourceManager: ResourceManager;
-    agentMailAdapter?: AgentMailAdapter;
-    stripeAdapter?: StripeAdapter;
-  }
+declare module "fastify" {
+	interface FastifyInstance {
+		resourceManager: ResourceManager;
+		agentMailAdapter?: AgentMailAdapter;
+		stripeAdapter?: StripeAdapter;
+	}
 }
 
 const resourceServicesPlugin: FastifyPluginCallback = (server, _opts, done) => {
-  const config = getServerConfig(process.env);
-  const adapters = new Map<string, ProviderAdapter>([['mock', new MockAdapter()]]);
+	const config = getServerConfig(process.env);
+	const adapters = new Map<string, ProviderAdapter>([
+		["mock", new MockAdapter()],
+	]);
 
-  if (config.AGENTMAIL_API_KEY && config.AGENTMAIL_WEBHOOK_SECRET) {
-    const agentMailAdapter = new AgentMailAdapter(
-      config.AGENTMAIL_API_KEY,
-      config.AGENTMAIL_WEBHOOK_SECRET,
-    );
-    adapters.set('agentmail', agentMailAdapter);
-    server.decorate('agentMailAdapter', agentMailAdapter);
-  }
+	if (config.AGENTMAIL_API_KEY && config.AGENTMAIL_WEBHOOK_SECRET) {
+		const agentMailAdapter = new AgentMailAdapter(
+			config.AGENTMAIL_API_KEY,
+			config.AGENTMAIL_WEBHOOK_SECRET,
+		);
+		adapters.set("agentmail", agentMailAdapter);
+		server.decorate("agentMailAdapter", agentMailAdapter);
+	}
 
-  if (config.STRIPE_SECRET_KEY && config.STRIPE_WEBHOOK_SECRET) {
-    const stripeAdapter = new StripeAdapter(config.STRIPE_SECRET_KEY, config.STRIPE_WEBHOOK_SECRET);
-    adapters.set('stripe', stripeAdapter);
-    server.decorate('stripeAdapter', stripeAdapter);
-  }
+	if (config.STRIPE_SECRET_KEY && config.STRIPE_WEBHOOK_SECRET) {
+		const stripeAdapter = new StripeAdapter(
+			config.STRIPE_SECRET_KEY,
+			config.STRIPE_WEBHOOK_SECRET,
+		);
+		adapters.set("stripe", stripeAdapter);
+		server.decorate("stripeAdapter", stripeAdapter);
+	}
 
-  server.decorate('resourceManager', new ResourceManager(adapters));
-  done();
+	server.decorate("resourceManager", new ResourceManager(adapters));
+	done();
 };
 
 export default fp(resourceServicesPlugin, {
-  name: 'resource-services',
-  dependencies: ['db'],
+	name: "resource-services",
+	dependencies: ["db"],
 });

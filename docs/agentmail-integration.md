@@ -9,7 +9,7 @@ AgentConnect uses [AgentMail](https://agentmail.to) as the email provider for pr
 | `AGENTMAIL_API_KEY`        | Yes (for email)    | AgentMail API key                         |
 | `AGENTMAIL_WEBHOOK_SECRET` | Yes (for webhooks) | Svix webhook signing secret (`whsec_...`) |
 
-When these variables are absent the server starts normally but `agentmail` provider is unavailable. `POST /agents/:id/actions/send_email` will return `500` and `POST /webhooks/agentmail` will return `500`.
+When these variables are absent the server starts normally but the `agentmail` provider is unavailable. Provisioning inboxes, sending mail, replying to mail, and ingesting AgentMail webhooks will fail until the adapter is configured.
 
 ## Provisioning
 
@@ -29,12 +29,38 @@ When these variables are absent the server starts normally but `agentmail` provi
   "html": "<p>HTML body</p>",
   "cc": ["cc@example.com"],
   "bcc": ["bcc@example.com"],
-  "reply_to": "replyto@example.com",
-  "idempotency_key": "optional-client-key"
+  "reply_to": ["replyto@example.com", "fallback@example.com"],
+  "idempotency_key": "required-client-key"
 }
 ```
 
-An `email.sent` event is written immediately with an empty `message_id`. The real `message_id` arrives later via the `message.sent` webhook.
+`idempotency_key` is required. AgentConnect persists outbound action state keyed by `(org_id, action, idempotency_key)` so callers can safely retry the same send without creating duplicate mail.
+
+AgentConnect records the provider `message_id` and `thread_id` returned by the send call immediately. Later webhook events add delivery lifecycle updates for the same message.
+
+## Replying to Email
+
+`POST /agents/:id/actions/reply_email` replies from the agent's active AgentMail inbox to a previously fetched or delivered message.
+
+**Request body**:
+
+```json
+{
+  "message_id": "msg_123",
+  "text": "Thanks for the update",
+  "html": "<p>Thanks for the update</p>",
+  "cc": ["teammate@example.com"],
+  "bcc": ["audit@example.com"],
+  "reply_to": ["replyto@example.com"],
+  "idempotency_key": "required-reply-key"
+}
+```
+
+The same required-idempotency rules apply to replies. AgentConnect fetches the original message first so policy checks and recipient reconstruction happen against provider truth, not caller-supplied fields.
+
+## Timeouts and Retries
+
+AgentConnect forwards request abort signals to AgentMail for `send_email`, `reply_email`, and `get_message`. Combined with the required idempotency keys, this makes timeout-driven retries safe: use the same `idempotency_key` when retrying the same operation.
 
 ## Webhook Integration
 
@@ -58,17 +84,16 @@ Webhooks are verified using [Svix](https://svix.com). The following headers must
 
 Fields relied on by AgentConnect:
 
-| Field                | Type     | Description                                                                      |
-| -------------------- | -------- | -------------------------------------------------------------------------------- |
-| `event_id`           | string   | Provider event ID used for deduplication                                         |
-| `event_type`         | string   | AgentMail event type (see mapping below)                                         |
-| `inbox_id`           | string   | Inbox email address — maps to `provider_ref` on the resource                     |
-| `message.message_id` | string   | Message identifier                                                               |
-| `message.thread_id`  | string   | Thread identifier                                                                |
-| `message.from`       | string   | Sender address (note: `"from"`, not `"from_"` — that is a Python SDK alias only) |
-| `message.to`         | string[] | Recipient addresses                                                              |
-| `message.subject`    | string   | Subject line                                                                     |
-| `message.timestamp`  | string   | ISO 8601 timestamp of when the message event occurred                            |
+| AgentMail `event_type` | Primary object | Fields AgentConnect reads                                                                                                                                  |
+| ---------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `message.received`     | `message`      | `message.inbox_id`, `message.message_id`, `message.thread_id`, `message.labels`, `message.from`, `message.to`, `message.subject`, `message.timestamp`      |
+| `message.sent`         | `send`         | `send.inbox_id`, `send.message_id`, `send.thread_id`, `send.recipients`, `send.timestamp`                                                                  |
+| `message.delivered`    | `delivery`     | `delivery.inbox_id`, `delivery.message_id`, `delivery.thread_id`, `delivery.recipients`, `delivery.timestamp`                                              |
+| `message.bounced`      | `bounce`       | `bounce.inbox_id`, `bounce.message_id`, `bounce.thread_id`, `bounce.recipients`, `bounce.type`, `bounce.sub_type`, `bounce.timestamp`                      |
+| `message.complained`   | `complaint`    | `complaint.inbox_id`, `complaint.message_id`, `complaint.thread_id`, `complaint.recipients`, `complaint.type`, `complaint.sub_type`, `complaint.timestamp` |
+| `message.rejected`     | `reject`       | `reject.inbox_id`, `reject.message_id`, `reject.thread_id`, `reject.reason`, `reject.timestamp`                                                            |
+
+All webhook variants also include `event_id` and `event_type`. AgentConnect uses `event_id` as the provider deduplication key.
 
 ### Event Type Mapping
 
@@ -85,5 +110,4 @@ Unknown `event_type` values are silently skipped (webhook returns `200`).
 
 ## Known MVP Limitations
 
-- **Empty `message_id` at send time**: The `email.sent` event written at send time has `message_id: ""`. The real message ID arrives via the `message.sent` webhook and is stored as a separate event record.
 - **Synchronous processing**: Webhooks are processed inline (no queue). Processing errors are logged but do not affect the `200 OK` response sent to Svix.

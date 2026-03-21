@@ -1,233 +1,362 @@
-import Stripe from 'stripe';
-
+import Stripe from "stripe";
+import { EVENT_TYPES } from "../domain/events.js";
 import type {
-  DeprovisionResult,
-  ParsedWebhookEvent,
-  ProviderAdapter,
-  ProvisionResult,
-  Resource,
-} from './provider-adapter.js';
-import { EVENT_TYPES } from '../domain/events.js';
+	DeprovisionResult,
+	ParsedWebhookEvent,
+	ProviderActionOptions,
+	ProviderAdapter,
+	ProvisionResult,
+	Resource,
+} from "./provider-adapter.js";
 
-// Stripe event payload shapes we depend on
-type StripeEventPayload = {
-  id: string; // evt_...
-  type: string;
-  created: number; // unix timestamp
-  data: { object: Record<string, unknown> };
+export const STRIPE_API_VERSION = Stripe.API_VERSION as Stripe.LatestApiVersion;
+
+export type StripeCardDetailsSession = {
+	cardId: string;
+	ephemeralKeySecret: string;
+	expiresAt: number;
+	livemode: boolean;
+	apiVersion: string;
 };
 
-type StripeExpandableId = string | { id: string };
+function getExpandableId(
+	value: string | { id: string } | null | undefined,
+): string | undefined {
+	if (typeof value === "string") return value;
+	if (value?.id) return value.id;
+	return undefined;
+}
 
-type StripeAuthObject = {
-  id: string; // iauth_...
-  card: StripeExpandableId; // ic_...
-  approved: boolean;
-  amount: number;
-  currency: string;
-};
+function readRequiredString(config: Record<string, unknown>, key: string) {
+	const value = config[key];
+	if (typeof value !== "string" || value.trim().length === 0) {
+		throw new Error(`Missing required Stripe config field: ${key}`);
+	}
 
-type StripeTransactionObject = {
-  id: string; // ipi_...
-  card: StripeExpandableId; // ic_...
-  amount: number;
-  currency: string;
-  authorization: StripeExpandableId | null;
-  type?: 'capture' | 'refund';
-};
+	return value.trim();
+}
 
-function getExpandableId(value: StripeExpandableId | null | undefined): string | undefined {
-  if (typeof value === 'string') return value;
-  if (value && typeof value.id === 'string') return value.id;
-  return undefined;
+function readOptionalString(config: Record<string, unknown>, key: string) {
+	const value = config[key];
+	return typeof value === "string" && value.trim().length > 0
+		? value.trim()
+		: undefined;
+}
+
+function readBillingAddress(
+	config: Record<string, unknown>,
+): Stripe.Issuing.CardholderCreateParams.Billing.Address {
+	const value = config.billing_address;
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		throw new Error("Missing required Stripe config field: billing_address");
+	}
+
+	const address = value as Record<string, unknown>;
+	return {
+		line1: readRequiredString(address, "line1"),
+		city: readRequiredString(address, "city"),
+		postal_code: readRequiredString(address, "postal_code"),
+		country: readRequiredString(address, "country").toUpperCase(),
+		...(readOptionalString(address, "line2")
+			? { line2: readOptionalString(address, "line2") }
+			: {}),
+		...(readOptionalString(address, "state")
+			? { state: readOptionalString(address, "state") }
+			: {}),
+	};
+}
+
+function buildSpendingControls(
+	config: Record<string, unknown>,
+): Stripe.Issuing.CardCreateParams.SpendingControls | undefined {
+	const spending_limits =
+		Array.isArray(config.spending_limits) && config.spending_limits.length > 0
+			? config.spending_limits.flatMap((entry) => {
+					if (typeof entry !== "object" || entry === null) {
+						return [];
+					}
+
+					const candidate = entry as Record<string, unknown>;
+					if (
+						typeof candidate.amount !== "number" ||
+						typeof candidate.interval !== "string"
+					) {
+						return [];
+					}
+
+					const categories =
+						Array.isArray(candidate.categories) &&
+						candidate.categories.length > 0
+							? (candidate.categories as Stripe.Issuing.CardCreateParams.SpendingControls.SpendingLimit.Category[])
+							: undefined;
+
+					return [
+						{
+							amount: candidate.amount,
+							...(categories ? { categories } : {}),
+							interval:
+								candidate.interval as Stripe.Issuing.CardCreateParams.SpendingControls.SpendingLimit.Interval,
+						},
+					];
+				})
+			: undefined;
+	const allowed_categories =
+		Array.isArray(config.allowed_categories) &&
+		config.allowed_categories.length > 0
+			? (config.allowed_categories as Stripe.Issuing.CardCreateParams.SpendingControls.AllowedCategory[])
+			: undefined;
+	const blocked_categories =
+		Array.isArray(config.blocked_categories) &&
+		config.blocked_categories.length > 0
+			? (config.blocked_categories as Stripe.Issuing.CardCreateParams.SpendingControls.BlockedCategory[])
+			: undefined;
+	const allowed_merchant_countries =
+		Array.isArray(config.allowed_merchant_countries) &&
+		config.allowed_merchant_countries.length > 0
+			? (config.allowed_merchant_countries as string[])
+			: undefined;
+	const blocked_merchant_countries =
+		Array.isArray(config.blocked_merchant_countries) &&
+		config.blocked_merchant_countries.length > 0
+			? (config.blocked_merchant_countries as string[])
+			: undefined;
+
+	const spendingControls: Stripe.Issuing.CardCreateParams.SpendingControls = {
+		...(spending_limits ? { spending_limits } : {}),
+		...(allowed_categories ? { allowed_categories } : {}),
+		...(blocked_categories ? { blocked_categories } : {}),
+		...(allowed_merchant_countries ? { allowed_merchant_countries } : {}),
+		...(blocked_merchant_countries ? { blocked_merchant_countries } : {}),
+	};
+
+	if (Object.keys(spendingControls).length > 0) {
+		return spendingControls;
+	}
+
+	// Safe defaults: $500/day, block cash advances & gambling
+	return {
+		spending_limits: [
+			{
+				amount: 50000, // $500 in cents
+				interval:
+					"daily" as Stripe.Issuing.CardCreateParams.SpendingControls.SpendingLimit.Interval,
+			},
+		],
+		blocked_categories: [
+			"automated_cash_disburse" as Stripe.Issuing.CardCreateParams.SpendingControls.BlockedCategory,
+			"manual_cash_disburse" as Stripe.Issuing.CardCreateParams.SpendingControls.BlockedCategory,
+			"gambling" as Stripe.Issuing.CardCreateParams.SpendingControls.BlockedCategory,
+			"lottery" as Stripe.Issuing.CardCreateParams.SpendingControls.BlockedCategory,
+		],
+	};
+}
+
+function buildAuthorizationEvent(
+	event: Stripe.IssuingAuthorizationCreatedEvent,
+): ParsedWebhookEvent {
+	const authorization = event.data.object;
+	const cardId = getExpandableId(authorization.card);
+	const eventType = authorization.approved
+		? EVENT_TYPES.PAYMENT_CARD_AUTHORIZED
+		: EVENT_TYPES.PAYMENT_CARD_DECLINED;
+
+	return {
+		resourceRef: cardId,
+		provider: "stripe",
+		providerEventId: event.id,
+		eventType,
+		occurredAt: new Date(event.created * 1000),
+		data: {
+			authorization_id: authorization.id,
+			amount: Math.abs(authorization.amount),
+			currency: authorization.currency.toUpperCase(),
+		},
+	};
+}
+
+function buildTransactionEvent(
+	event: Stripe.IssuingTransactionCreatedEvent,
+): ParsedWebhookEvent {
+	const transaction = event.data.object;
+	const cardId = getExpandableId(transaction.card);
+	const authorizationId = getExpandableId(transaction.authorization);
+
+	return {
+		resourceRef: cardId,
+		provider: "stripe",
+		providerEventId: event.id,
+		eventType: EVENT_TYPES.PAYMENT_CARD_SETTLED,
+		occurredAt: new Date(event.created * 1000),
+		data: {
+			transaction_id: transaction.id,
+			...(authorizationId !== undefined
+				? { authorization_id: authorizationId }
+				: {}),
+			amount: transaction.amount,
+			currency: transaction.currency.toUpperCase(),
+			transaction_type: transaction.type,
+		},
+	};
 }
 
 export class StripeAdapter implements ProviderAdapter {
-  readonly providerName = 'stripe';
-  private readonly stripe: Stripe;
-  private readonly webhookSecret: string;
+	readonly providerName = "stripe";
+	private readonly stripe: Stripe;
+	private readonly webhookSecret: string;
 
-  constructor(secretKey: string, webhookSecret: string) {
-    this.stripe = new Stripe(secretKey);
-    this.webhookSecret = webhookSecret;
-  }
+	constructor(secretKey: string, webhookSecret: string) {
+		this.stripe = new Stripe(secretKey, {
+			apiVersion: STRIPE_API_VERSION,
+		});
+		this.webhookSecret = webhookSecret;
+	}
 
-  async provision(_agentId: string, config: Record<string, unknown>): Promise<ProvisionResult> {
-    const billingName =
-      typeof config['billing_name'] === 'string' ? config['billing_name'] : _agentId;
+	private constructWebhookEvent(
+		rawBody: Buffer,
+		headers: Record<string, string>,
+	): Stripe.Event {
+		return this.stripe.webhooks.constructEvent(
+			rawBody,
+			headers["stripe-signature"] ?? "",
+			this.webhookSecret,
+		);
+	}
 
-    const cardholder = await this.stripe.issuing.cardholders.create({
-      name: billingName,
-      type: 'individual',
-      billing: {
-        address: {
-          line1: '1 Agent Street',
-          city: 'San Francisco',
-          postal_code: '94105',
-          country: 'US',
-        },
-      },
-    });
+	async provision(
+		_agentId: string,
+		config: Record<string, unknown>,
+	): Promise<ProvisionResult> {
+		const cardholderName = readRequiredString(config, "cardholder_name");
+		const currency = readRequiredString(config, "currency").toLowerCase();
+		const billingAddress = readBillingAddress(config);
+		const spendingControls = buildSpendingControls(config);
 
-    const spendingLimits = Array.isArray(config['spending_limits'])
-      ? (config['spending_limits'] as Array<{ amount: number; interval: string }>).map((l) => ({
-          amount: l.amount,
-          interval:
-            l.interval as Stripe.Issuing.CardCreateParams.SpendingControls.SpendingLimit.Interval,
-        }))
-      : [];
+		const cardholder = await this.stripe.issuing.cardholders.create({
+			name: cardholderName,
+			type: "individual",
+			billing: {
+				address: billingAddress,
+			},
+		});
 
-    const spendingControls: Stripe.Issuing.CardCreateParams.SpendingControls = {
-      spending_limits: spendingLimits,
-    };
+		const cardParams: Stripe.Issuing.CardCreateParams = {
+			cardholder: cardholder.id,
+			type: "virtual",
+			currency,
+			status: "active",
+			...(spendingControls ? { spending_controls: spendingControls } : {}),
+		};
 
-    if (Array.isArray(config['allowed_categories'])) {
-      spendingControls.allowed_categories = config[
-        'allowed_categories'
-      ] as Stripe.Issuing.CardCreateParams.SpendingControls.AllowedCategory[];
-    }
+		let card: Stripe.Issuing.Card;
+		try {
+			card = await this.stripe.issuing.cards.create(cardParams);
+		} catch (err) {
+			await this.stripe.issuing.cardholders
+				.update(cardholder.id, { status: "inactive" })
+				.catch(() => {});
+			throw err;
+		}
 
-    if (Array.isArray(config['allowed_merchant_countries'])) {
-      spendingControls.allowed_merchant_countries = config[
-        'allowed_merchant_countries'
-      ] as string[];
-    }
+		return {
+			providerRef: card.id,
+			config: {
+				cardholder_id: cardholder.id,
+				last4: card.last4,
+				exp_month: card.exp_month,
+				exp_year: card.exp_year,
+				currency,
+			},
+		};
+	}
 
-    const cardParams: Stripe.Issuing.CardCreateParams = {
-      cardholder: cardholder.id,
-      type: 'virtual',
-      currency: 'usd',
-      status: 'active',
-      spending_controls: spendingControls,
-    };
+	async createCardDetailsSession(
+		resource: Resource,
+		nonce: string,
+	): Promise<StripeCardDetailsSession> {
+		if (!resource.providerRef) {
+			throw new Error(`Resource ${resource.id} has no providerRef`);
+		}
 
-    let card: Stripe.Issuing.Card;
-    try {
-      card = await this.stripe.issuing.cards.create({
-        ...cardParams,
-        expand: ['number', 'cvc'],
-      });
-    } catch (err) {
-      await this.stripe.issuing.cardholders
-        .update(cardholder.id, { status: 'inactive' })
-        .catch(() => {});
-      throw err;
-    }
+		const ephemeralKey = await this.stripe.ephemeralKeys.create(
+			{
+				issuing_card: resource.providerRef,
+				nonce,
+			},
+			{ apiVersion: STRIPE_API_VERSION },
+		);
 
-    return {
-      providerRef: card.id, // ic_...
-      config: {
-        cardholder_id: cardholder.id,
-        last4: card.last4,
-        exp_month: card.exp_month,
-        exp_year: card.exp_year,
-      },
-      sensitiveData: {
-        number: card.number ?? null,
-        cvc: card.cvc ?? null,
-        exp_month: card.exp_month,
-        exp_year: card.exp_year,
-        last4: card.last4,
-      },
-    };
-  }
+		if (!ephemeralKey.secret) {
+			throw new Error("Stripe ephemeral key response did not include a secret");
+		}
 
-  async deprovision(resource: Resource): Promise<DeprovisionResult> {
-    if (!resource.providerRef) {
-      throw new Error(`Resource ${resource.id} has no providerRef`);
-    }
+		return {
+			cardId: resource.providerRef,
+			ephemeralKeySecret: ephemeralKey.secret,
+			expiresAt: ephemeralKey.expires,
+			livemode: ephemeralKey.livemode,
+			apiVersion: STRIPE_API_VERSION,
+		};
+	}
 
-    const cardholderId =
-      typeof resource.config['cardholder_id'] === 'string'
-        ? resource.config['cardholder_id']
-        : null;
+	async deprovision(resource: Resource): Promise<DeprovisionResult> {
+		if (!resource.providerRef) {
+			throw new Error(`Resource ${resource.id} has no providerRef`);
+		}
 
-    await this.stripe.issuing.cards.update(resource.providerRef, { status: 'canceled' });
+		const cardholderId =
+			typeof resource.config.cardholder_id === "string"
+				? resource.config.cardholder_id
+				: null;
 
-    if (cardholderId) {
-      await this.stripe.issuing.cardholders.update(cardholderId, { status: 'inactive' });
-    }
+		await this.stripe.issuing.cards.update(resource.providerRef, {
+			status: "canceled",
+		});
 
-    return {};
-  }
+		if (cardholderId) {
+			await this.stripe.issuing.cardholders.update(cardholderId, {
+				status: "inactive",
+			});
+		}
 
-  performAction(
-    _resource: Resource,
-    action: string,
-    _payload: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    return Promise.reject(new Error(`Unsupported action for stripe card resource: ${action}`));
-  }
+		return {};
+	}
 
-  verifyWebhook(rawBody: Buffer, headers: Record<string, string>): Promise<boolean> {
-    try {
-      this.stripe.webhooks.constructEvent(
-        rawBody,
-        headers['stripe-signature'] ?? '',
-        this.webhookSecret,
-      );
-      return Promise.resolve(true);
-    } catch {
-      return Promise.resolve(false);
-    }
-  }
+	performAction(
+		_resource: Resource,
+		action: string,
+		_payload: Record<string, unknown>,
+		_options?: ProviderActionOptions,
+	): Promise<Record<string, unknown>> {
+		return Promise.reject(
+			new Error(`Unsupported action for stripe card resource: ${action}`),
+		);
+	}
 
-  parseWebhook(rawBody: Buffer, _headers: Record<string, string>): Promise<ParsedWebhookEvent[]> {
-    let payload: StripeEventPayload;
-    try {
-      payload = JSON.parse(rawBody.toString()) as StripeEventPayload;
-    } catch {
-      return Promise.resolve([]);
-    }
+	verifyWebhook(
+		rawBody: Buffer,
+		headers: Record<string, string>,
+	): Promise<boolean> {
+		try {
+			this.constructWebhookEvent(rawBody, headers);
+			return Promise.resolve(true);
+		} catch {
+			return Promise.resolve(false);
+		}
+	}
 
-    const occurredAt = new Date(payload.created * 1000);
+	parseWebhook(
+		rawBody: Buffer,
+		headers: Record<string, string>,
+	): Promise<ParsedWebhookEvent[]> {
+		const event = this.constructWebhookEvent(rawBody, headers);
 
-    if (payload.type === 'issuing_authorization.created') {
-      const auth = payload.data.object as StripeAuthObject;
-      const cardId = getExpandableId(auth.card);
-      const eventType = auth.approved
-        ? EVENT_TYPES.PAYMENT_CARD_AUTHORIZED
-        : EVENT_TYPES.PAYMENT_CARD_DECLINED;
-
-      return Promise.resolve([
-        {
-          resourceRef: cardId,
-          provider: this.providerName,
-          providerEventId: payload.id,
-          eventType,
-          occurredAt,
-          data: {
-            authorization_id: auth.id,
-            amount: Math.abs(auth.amount),
-            currency: auth.currency.toUpperCase(),
-          },
-        },
-      ]);
-    }
-
-    if (payload.type === 'issuing_transaction.created') {
-      const txn = payload.data.object as StripeTransactionObject;
-      const cardId = getExpandableId(txn.card);
-      const authorizationId = getExpandableId(txn.authorization);
-
-      return Promise.resolve([
-        {
-          resourceRef: cardId,
-          provider: this.providerName,
-          providerEventId: payload.id,
-          eventType: EVENT_TYPES.PAYMENT_CARD_SETTLED,
-          occurredAt,
-          data: {
-            transaction_id: txn.id,
-            ...(authorizationId !== undefined ? { authorization_id: authorizationId } : {}),
-            amount: txn.amount,
-            currency: txn.currency.toUpperCase(),
-            ...(txn.type ? { transaction_type: txn.type } : {}),
-          },
-        },
-      ]);
-    }
-
-    return Promise.resolve([]);
-  }
+		switch (event.type) {
+			case "issuing_authorization.created":
+				return Promise.resolve([buildAuthorizationEvent(event)]);
+			case "issuing_transaction.created":
+				return Promise.resolve([buildTransactionEvent(event)]);
+			default:
+				return Promise.resolve([]);
+		}
+	}
 }

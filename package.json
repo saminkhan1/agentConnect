@@ -1,43 +1,45 @@
 {
-  "name": "agentconnect",
-  "private": true,
-  "type": "commonjs",
-  "scripts": {
-    "dev": "tsx watch src/api/server.ts",
-    "build": "tsc",
-    "test": "tsx --test tests/*.test.ts",
-    "test:integration": "drizzle-kit migrate && tsx --test tests/*.integration.ts",
-    "verify": "prettier --check . && eslint . && tsc --noEmit && pnpm run test && pnpm run  test:integration",
-    "fix": "eslint . --fix && prettier --write .",
-    "prepare": "node scripts/setup-git-hooks.cjs",
-    "db:push": "drizzle-kit push --force",
-    "db:migrate": "drizzle-kit migrate",
-    "db:generate": "drizzle-kit generate"
-  },
-  "dependencies": {
-    "agentmail": "^0.4.2",
-    "dotenv": "^17.3.1",
-    "drizzle-orm": "^0.45.1",
-    "fastify": "^5.8.1",
-    "fastify-plugin": "^5.1.0",
-    "fastify-type-provider-zod": "^6.1.0",
-    "pg": "^8.20.0",
-    "stripe": "^20.4.1",
-    "svix": "^1.86.0",
-    "zod": "^4.3.6"
-  },
-  "devDependencies": {
-    "@eslint/js": "^10.0.1",
-    "@types/node": "^25.3.3",
-    "@types/pg": "^8.18.0",
-    "drizzle-kit": "^0.31.9",
-    "eslint": "^10.0.2",
-    "eslint-config-prettier": "^10.1.8",
-    "eslint-plugin-drizzle": "^0.2.3",
-    "eslint-plugin-simple-import-sort": "^12.1.1",
-    "prettier": "^3.8.1",
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3",
-    "typescript-eslint": "^8.56.1"
-  }
+	"name": "agentconnect",
+	"version": "0.5.0",
+	"private": true,
+	"type": "commonjs",
+	"scripts": {
+		"dev": "tsx watch src/api/server.ts",
+		"dev:webhooks": "tsx scripts/dev-webhooks.ts",
+		"mcp:stdio": "tsx src/mcp-stdio.ts",
+		"worker:webhooks": "tsx src/worker/outbound-webhooks.ts",
+		"build": "tsup src/api/server.ts src/worker/outbound-webhooks.ts src/mcp-stdio.ts --format cjs,esm --dts",
+		"typecheck": "tsc --noEmit",
+		"test": "tsx --test tests/*.test.ts",
+		"test:integration": "drizzle-kit migrate && tsx --test tests/*.integration.ts",
+		"test:stripe-live": "drizzle-kit migrate && tsx --test tests/stripe-live.integration.ts",
+		"verify": "biome check . && pnpm run typecheck && pnpm run db:migrate && pnpm run test && pnpm run test:integration",
+		"fix": "biome check --write .",
+		"prepare": "node scripts/setup-git-hooks.cjs",
+		"db:push": "drizzle-kit push --force",
+		"db:migrate": "drizzle-kit migrate",
+		"db:generate": "drizzle-kit generate"
+	},
+	"dependencies": {
+		"@modelcontextprotocol/sdk": "^1.27.1",
+		"agentmail": "^0.4.6",
+		"dotenv": "^17.3.1",
+		"drizzle-orm": "^0.45.1",
+		"fastify": "^5.8.1",
+		"fastify-plugin": "^5.1.0",
+		"fastify-type-provider-zod": "^6.1.0",
+		"pg": "^8.20.0",
+		"stripe": "^20.4.1",
+		"svix": "^1.86.0",
+		"zod": "^4.3.6"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.4.7",
+		"@types/node": "^25.3.3",
+		"@types/pg": "^8.18.0",
+		"drizzle-kit": "^0.31.9",
+		"tsup": "^8.5.1",
+		"tsx": "^4.21.0",
+		"typescript": "^5.9.3"
+	}
 }

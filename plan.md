@@ -2,22 +2,25 @@
 
 ## Full Project
 
-**What we’re building:** A unified control plane + event log that maps real-world capabilities (email, SMS, voice calls, card payments, later wallets/x402) onto canonical `agent_id`s, with safe tool/MCP access and a per-agent timeline.
+**What we’re building:** A unified control plane + event log that lets AI agents send and receive emails and make payments — with safe tool/MCP access and a per-agent timeline.
 
-**Who it’s for:** Early wedge = teams already building LLM agents that need production comms + payments quickly:
+**Who it’s for:** First wedge = personal AI users and prosumers who want managed, fast, safe access to real-world capabilities for their agent. Expansion = power users, small teams, startups (see `business-plan.md` for full go-to-market).
 
-- (a) agent platforms / orchestration frameworks
-- (b) AI-native SaaS products giving each user/agent its own inbox/phone/card
-- (c) infra teams at larger companies piloting agentic workflows.
+**Why now / why we win:** Email-for-agents (AgentMail), card-for-agents (AgentCard, Slash), and protocols like MCP are maturing, but they’re all separate silos. Nobody unifies email + payments under one agent identity with policy, observability, and audit across all rails. We win by being the only product where one `agent_id` can send an email, buy something with a virtual card, and have the full activity timeline in one place.
 
-**Why now / why we win:** Email-for-agents (AgentMail), card-for-agents (AgentCard), and protocols like MCP and x402 are maturing, but they’re all separate silos; identity, policy, and unified observability across rails are missing. We win by being the neutral, multi-rail “agent infra” layer that sits above providers and below orchestration frameworks.
+**Current status (March 2026):** MVP beta ready. Phases A–E2 built (intern), Sprints 0–4 complete (billing, ops, onboarding). 197 tests passing. Ready to deploy to Railway and onboard first paying users.
+
+**Protocol strategy:** Three layers, adopted incrementally:
+- **MCP** — tool/capability transport (shipped, Phase E)
+- **Agent Auth Protocol** (agent-auth-protocol.com) — per-agent cryptographic identity, scoped capability grants. Deferred until multi-agent teams need it.
+- **MPP** (mpp.dev, Stripe + Tempo) — HTTP 402-based machine-to-machine payments. Deferred until ecosystem matures.
 
 ## MVP
 
 Single codebase, 2 process types (low cost, easy scaling). Ship one Node/TS repo + one container image, but run it as:
 
 - **API process:** REST + inbound webhooks (+ later MCP)
-- **Worker process:** async jobs (webhook processing, outbound delivery retries, backfills)
+- **Worker process:** async jobs (outbound webhook delivery, retries, backfills — partially built in Phase E)
 
 This keeps MVP infra minimal (often Postgres-only) while giving you a clean scaling path:
 
@@ -56,7 +59,7 @@ Even if voice is deferred, design now for low-latency paths:
 
 ## Repo & Branch Strategy
 
-- **Trunk:** `main` — always deployable, protected, requires PR + 1 review.
+- **Trunk:** `main` — always deployable, protected, requires PR + CI pass (solo dev: self-review).
 - **Branch naming:**
   - `feat/<phase>/<description>` — new functionality
   - `fix/<description>` — bug fixes
@@ -69,10 +72,12 @@ Even if voice is deferred, design now for low-latency paths:
 ### Canonical entities
 
 - `orgs` → owns everything
-- `api_keys` → root + service (MVP)
+- `api_keys` → root + service (MVP); later complemented by Agent Auth per-agent identity (Phase H)
 - `agents` → canonical `agent_id`
-- `resources` → “capabilities” attached to an agent (inbox, card)
+- `resources` → “capabilities” attached to an agent (inbox, card; later payment_account in Phase I)
 - `events` → immutable canonical log (the product)
+- `outbound_actions` → idempotent outbound operations (send_email, reply_email; added Phase E)
+- `webhook_subscriptions` + `webhook_deliveries` → outbound webhook fanout (added Phase E)
 
 ### Event idempotency strategy (provider-friendly)
 
@@ -153,15 +158,15 @@ Use two layers:
 
 > **Provider:** AgentMail — uses Svix for webhook delivery. SDK: `@agentmail/client` (TS) or `agentmail` (Python).
 
-| Commit                                                     | What                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `feat: AgentMailAdapter provision + deprovision`           | Call `client.inboxes.create()`. The response `inbox_id` **is** the full email address (e.g., `agent123@agentmail.to`). Store it as `provider_ref` on the resource row. Deprovision calls `client.inboxes.delete(inboxId)`.                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `feat: POST /agents/:id/actions/send_email`                | Lookup email resource → `enforceEmailPolicy` → call `client.inboxes.messages.send(resource.provider_ref, { to, subject, text, html?, cc?, bcc?, reply_to? })` (TS SDK: `inbox_id` is positional first arg, remaining fields are the second object arg). Emit `email.sent` event with idempotency via action `idempotency_key`.                                                                                                                                                                                                                                                                                                                  |
-| `feat: inbound webhook endpoint`                           | `POST /webhooks/agentmail` — **Expose raw body buffer** (do not parse JSON before verification). Verify using the Svix library: `new Webhook(secret).verify(rawBody, headers)` where headers must include `svix-id`, `svix-timestamp`, and `svix-signature`. On success, enqueue raw payload + headers for async processing and return `200` immediately.                                                                                                                                                                                                                                                                                       |
-| `feat: webhook job processor (email)`                      | AgentMail payload shape: `{ event_type, event_id, organization_id, inbox_id, message: { message_id, thread_id, from, to, subject, text, html, preview, timestamp, ... } }`. Map `event_id` → `provider_event_id` for deduplication. Canonical mappings: `message.received` → `email.received`, `message.sent` → `email.sent`, `message.delivered` → `email.delivered`, `message.bounced` → `email.bounced`, `message.complained` → `email.complained`, `message.rejected` → `email.rejected`. Extract `thread_id` and `message_id` from nested `message` object; note the JSON key is `"from"` (not `from_` — that is a Python SDK alias only). |
-| `feat: provider client wrapper`                            | Timeouts, retries with jitter for outbound API calls; circuit-breaker hooks (lightweight).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `test: email send + webhook ingestion e2e (mock provider)` | Mock AgentMail API + generate Svix-signed webhook payloads (use test secret + Svix test helper). Assert canonical events written to DB with correct `provider_event_id`, `thread_id`, and `from` field.                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `docs: provider integration contract`                      | Document AgentMail webhook payload fields depended on: `event_id` (dedup key), `event_type`, `message.thread_id`, `message.message_id`, `message.from`, `message.timestamp`. Note all 6 canonical email event types supported.                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Commit                                                     | What                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `feat: AgentMailAdapter provision + deprovision`           | Call `client.inboxes.create()`. The response `inbox_id` **is** the full email address (e.g., `agent123@agentmail.to`). Store it as `provider_ref` on the resource row. Deprovision calls `client.inboxes.delete(inboxId)`.                                                                                                                                                                                                                                                                                         |
+| `feat: POST /agents/:id/actions/send_email`                | Lookup email resource → `enforceEmailPolicy` → call `client.inboxes.messages.send(resource.provider_ref, { to, subject, text, html?, cc?, bcc?, reply_to?: single address or address array })` (TS SDK: `inbox_id` is positional first arg, remaining fields are the second object arg). Emit `email.sent` event with idempotency via action `idempotency_key`.                                                                                                                                                    |
+| `feat: inbound webhook endpoint`                           | `POST /webhooks/agentmail` — **Expose raw body buffer** (do not parse JSON before verification). Verify using the Svix library: `new Webhook(secret).verify(rawBody, headers)` where headers must include `svix-id`, `svix-timestamp`, and `svix-signature`. On success, enqueue raw payload + headers for async processing and return `200` immediately.                                                                                                                                                          |
+| `feat: webhook job processor (email)`                      | AgentMail webhook payloads are event-specific. `message.received` carries a `message` object whose `message.inbox_id` maps to `provider_ref`; `message.sent`, `message.delivered`, `message.bounced`, `message.complained`, and `message.rejected` use `send`, `delivery`, `bounce`, `complaint`, and `reject` objects respectively. Map `event_id` → `provider_event_id` for deduplication, then extract `message_id`, `thread_id`, timestamp, recipients, and reason/type fields from the event-specific object. |
+| `feat: provider client wrapper`                            | Timeouts, retries with jitter for outbound API calls; circuit-breaker hooks (lightweight).                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `test: email send + webhook ingestion e2e (mock provider)` | Mock AgentMail API + generate Svix-signed webhook payloads (use test secret + Svix test helper). Assert canonical events written to DB with correct `provider_event_id`, `thread_id`, and `from` field.                                                                                                                                                                                                                                                                                                            |
+| `docs: provider integration contract`                      | Document AgentMail webhook payload fields depended on: `event_id` (dedup key), `event_type`, `message.thread_id`, `message.message_id`, `message.from`, `message.timestamp`. Note all 6 canonical email event types supported.                                                                                                                                                                                                                                                                                     |
 
 **PR → main:** “Phase C2: email end-to-end (resource + action + webhooks)”
 **Tag:** `v0.3.0`
@@ -199,32 +204,105 @@ Use two layers:
 
 ## Phase E — MCP + Outbound Webhooks (Weeks 7–8)
 
-**Goal:** Orchestrators can discover/call tools via MCP, and customers can subscribe to events from your control plane.
+**Goal:** Ship the official orchestrator integration paths without creating a second architecture: Hermes connects over standard MCP, OpenClaw consumes canonical events via its official hook surfaces, and we do not claim production readiness until those paths pass explicit conformance + reliability gates.
+
+### Phase E guardrails
+
+- Keep the lean MVP shape: one codebase, one image, API + Worker only. No orchestrator-specific sidecar service.
+- MCP stays a thin transport over existing Fastify routes/domain services. No duplicate business logic for tool calls.
+- Outbound webhook fanout stays async in the Worker and Postgres-backed queue path. API request paths remain fast-ACK.
+- Add only bounded compatibility needed by official docs: scoped MCP auth, outbound auth headers, and a small set of delivery modes. Do **not** build a general transformation/workflow engine in MVP.
+- Do not mark Hermes/OpenClaw support as “production ready” in README/docs until the suites below pass in CI and in a staging smoke run.
 
 ### Branch: `feat/phaseE/mcp-gateway`
 
-| Commit                                    | What                                                                                                                    |
-| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `feat: MCP server module (minimal tools)` | Tools: `agentinfra.email.send`, `agentinfra.payments.issue_card`, `agentinfra.events.list`, `agentinfra.timeline.list`. |
-| `feat: MCP auth via API key`              | `AGENTINFRA_API_KEY` resolves org + scopes; tool list reflects scopes.                                                  |
-| `feat: call_tool dispatch`                | Map tools → internal REST handlers/services (avoid duplicating logic).                                                  |
-| `docs: MCP integration guide`             | Claude Desktop/Cursor config examples; recommended scopes.                                                              |
-| `test: MCP list_tools + call_tool e2e`    | Ensure tool schemas stable + errors typed.                                                                              |
+| Commit                                         | What                                                                                                                                                                                                                                                                                                    |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `feat: MCP server module (thin facade)`        | Expose the existing bootstrap + scoped agent/resource/email/payment/event/timeline capabilities through MCP. Root-only tools (for example `agentinfra.payments.create_card_details_session`) stay hidden unless the session is authenticated with a root key.                                           |
+| `feat: MCP auth + transport boundaries`        | Support both stdio and HTTP `/mcp`; Bearer API key resolves org + scopes; `tools/list` reflects scope + key type; unauthenticated sessions expose bootstrap-only tools.                                                                                                                                 |
+| `feat: call_tool dispatch`                     | Map tools → internal REST handlers/services via Fastify inject so MCP cannot drift from the core API behavior.                                                                                                                                                                                          |
+| `docs: Hermes + generic MCP integration guide` | Hermes `mcp_servers` examples (`url`, `headers`, `timeout`, `connect_timeout`), Claude Desktop/Cursor examples, service-vs-root key guidance, and failure-mode notes.                                                                                                                                   |
+| `test: MCP protocol conformance e2e`           | Cover `initialize`, `tools/list`, `tools/call`, auth failures, CORS/HTTP transport, root-only tool hiding, and typed error envelopes.                                                                                                                                                                   |
+| `test: Hermes agent compatibility suite`       | Add `tests/hermes-mcp.integration.ts` to drive a Hermes-style remote MCP config against `/mcp`, verify reconnect after disconnect, prefixed tool discovery, and end-to-end `agents.create`, `resources.create`, `email.send`, `email.reply`, `events.list`, `timeline.list`, and `payments.issue_card`. |
 
-**PR → main:** “Phase E1: MCP gateway (thin)”
-**Tag:** `v0.5.0`
+**PR → main:** “Phase E1: MCP gateway + Hermes conformance”
 
 ### Branch: `feat/phaseE/outbound-webhooks`
 
-| Commit                                                 | What                                                                                                                                                                                                                      |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `migration: create webhook_subscriptions + deliveries` | `webhook_subscriptions(id, org_id, url, event_types[], signing_secret, status, created_at)` and `webhook_deliveries(id, subscription_id, event_id, attempt_count, last_status, next_attempt_at, created_at, updated_at)`. |
-| `feat: POST /webhook-subscriptions`                    | Create subscription + generate secret; validate URL allowlist (basic SSRF guard).                                                                                                                                         |
-| `feat: delivery worker (retries)`                      | Worker picks new events → fanout to subs → HMAC signature → 3 retries exponential backoff.                                                                                                                                |
-| `feat: GET /webhook-subscriptions/:id/deliveries`      | Debug recent failures/success.                                                                                                                                                                                            |
-| `test: outbound delivery + retry`                      | Fake endpoint, assert retries and final status.                                                                                                                                                                           |
+| Commit                                                       | What                                                                                                                                                                                                                                                                                                         |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `migration: create webhook_subscriptions + deliveries`       | `webhook_subscriptions(id, org_id, url, event_types[], delivery_mode, signing_secret, static_headers, status, created_at)` and `webhook_deliveries(id, subscription_id, event_id, attempt_count, last_status, next_attempt_at, created_at, updated_at)`. Add unique dedupe on `(subscription_id, event_id)`. |
+| `feat: POST /webhook-subscriptions`                          | Create subscription + generate secret; validate URL allowlist (basic SSRF guard); allow a bounded `delivery_mode` enum and allowlisted static outbound auth headers so AgentConnect can authenticate to official OpenClaw hook endpoints.                                                                    |
+| `feat: delivery worker (retries + bounded payload adapters)` | Worker picks new events → fanout to subs → HMAC signature for canonical payloads → apply delivery mode mapping → send auth headers → 3 retries with exponential backoff + jitter. Keep mappings intentionally small (`canonical_event` default, `openclaw_hook_agent`/`openclaw_hook_wake` only if needed).  |
+| `feat: GET /webhook-subscriptions/:id/deliveries`            | Debug recent failures/success with enough request/response metadata to triage auth and payload mismatches safely.                                                                                                                                                                                            |
+| `docs: OpenClaw webhook integration guide`                   | Document direct delivery to `POST /hooks/agent` / `POST /hooks/wake`, dedicated hook tokens, `allowedAgentIds`, `allowedSessionKeyPrefixes`, and when to keep `allowRequestSessionKey=false`.                                                                                                                |
+| `test: outbound delivery + retry`                            | Fake endpoint, assert retries, no duplicate fanout for the same `(subscription_id, event_id)`, and final status accounting.                                                                                                                                                                                  |
+| `test: OpenClaw hook compatibility suite`                    | Add `tests/openclaw-hooks.integration.ts` to verify AgentConnect can deliver to OpenClaw hooks with `Authorization: Bearer` or `x-openclaw-token`, expected body shape, correct retry handling for `401`/`429`/transient `5xx`, and no retries for stable `400` payload failures.                            |
 
-**PR → main:** “Phase E2: outbound webhooks (thin, reliable enough)”
+**PR → main:** “Phase E2: outbound webhooks + OpenClaw hook conformance”
+**Tag:** `v0.5.0` — orchestrator-ready MVP (`Hermes MCP` + `OpenClaw hooks`) verified on the lean architecture.
+
+### Phase E3: Auth Hardening — CUT FOR MVP
+
+> **Status:** Cut. Key expiry, HMAC signing, rate limiting, and A2A Agent Card are not needed for the first 50 beta users. Manual key revocation is sufficient. Revisit after first paying customers.
+
+## Phase F — MVP Beta: Billing + Ops + Onboarding (COMPLETED)
+
+**Goal:** Get from "working code" to "deployable product with revenue path." Replaces the original Phase F (usage_counters table + 6-tier billing) and Phase G (KYC + real-time authz) with a leaner approach.
+
+**What was actually built (Sprints 0–4):**
+
+### Sprint 0: Security fixes
+- `transitionState` current-state guard in `OutboundActionDal` (`src/db/dal.ts`)
+- Ephemeral key filtered from MCP text content (`src/mcp/tools/payments.ts`)
+- DNS rebinding check at webhook delivery time (`src/domain/outbound-webhooks.ts`)
+- `findByIdempotencyKey` scoped by action type (`src/db/dal.ts`)
+- `withTimeout` signal documented as accepted behavior (`src/api/routes/outbound-email-actions.ts`)
+
+### Sprint 1: Billing + signup gate + plan quotas
+- **Signup gate:** `SIGNUP_SECRET` env var, required as `x-signup-secret` header on `POST /orgs` when configured (`src/api/routes/orgs.ts`)
+- **Schema:** Added billing fields to `orgs` table — `plan_tier` (enum: starter/personal/power), `stripe_customer_id`, `stripe_subscription_id`, `subscription_status`, `current_period_end` (`src/db/schema.ts`, migration `0005`)
+- **Billing service:** `src/domain/billing.ts` — `createCheckoutSession()`, `createPortalSession()`, `syncSubscription()`. Handles `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_failed`
+- **Billing routes:** `POST /billing/checkout` → returns `{ url }`, `POST /billing/portal` → returns `{ url }` (`src/api/routes/billing.ts`)
+- **Billing webhook:** `POST /webhooks/stripe-billing` — separate from issuing webhook (`src/api/routes/webhooks.ts`)
+- **Subscription enforcement:** `onRequest` hook in `server.ts`, only active when `SIGNUP_SECRET` is configured. Returns 402 for inactive subscriptions. Exempts `/health`, `/webhooks/`, `/orgs`, `/billing/`, `/mcp`
+- **Plan quotas:** `src/domain/billing-limits.ts` — enforced via `COUNT(*)` queries on existing tables (no separate `usage_counters` table). Limits:
+
+| | Starter ($19) | Personal ($29) | Power ($49) |
+|---|---|---|---|
+| Agents | 1 | 1 | 3 |
+| Inboxes | 1 | 1 | 3 |
+| Emails/mo | 1,000 | 2,000 | 5,000 |
+| Cards/mo | 5 | 15 | 50 |
+
+- **Cards included at every tier** — not gated behind a separate plan. Safe defaults applied via Stripe's native `spending_controls`: $500/day limit, blocked cash advances + gambling (`src/adapters/stripe-adapter.ts`)
+- **Tests:** 8 new billing tests (`tests/billing.test.ts`)
+
+### Sprint 2: Landing page + onboarding
+- Updated landing page at `lab-landing/agentconnect.html` — positioned around unification ("One identity for your autonomous AI agent. Email. Payments. Full audit trail.")
+- Added pricing section (3 tiers, cards at every tier)
+- Added MCP / Claude Desktop section with `claude_desktop_config.json` example
+- Updated code examples to match actual API
+- Removed phone/telephony references (not implemented)
+
+### Sprint 3: Operational readiness
+- **Health probe:** `SELECT 1` DB check, returns 503 on failure (`src/api/routes/health.ts`)
+- **Structured log context:** `orgId` + `keyId` added to request logs after auth resolution (`src/plugins/auth.ts`)
+- **Graceful shutdown:** SIGTERM/SIGINT handlers for API (`server.close()`) and Worker (`shuttingDown` flag finishes current drain cycle) (`src/api/server.ts`, `src/worker/outbound-webhooks.ts`)
+
+### Sprint 4: Differentiation
+- **MCP tool description polish:** All tool descriptions updated to emphasize unified cross-capability experience (`src/mcp/tools/*.ts`)
+- **Safe card defaults:** Conservative `spending_controls` applied when user doesn't specify any (`src/adapters/stripe-adapter.ts`)
+
+**197 tests passing** (163 unit + 34 integration). `pnpm run verify` passes.
+
+**Tag:** `v0.5.0` — MVP beta ready for first paying users.
+
+---
+
+## Original Phase G — Stripe Issuing Compliance — DEFERRED
+
+> **Status:** Deferred. Stripe's built-in `spending_controls` + safe defaults at card creation + manual invite via `SIGNUP_SECRET` is sufficient for beta. KYC, cardholder ToS gates, and real-time `issuing_authorization.request` handling are not needed until volume justifies it.
 
 ## Cross-cutting Concerns (Build them in from Day 1)
 
@@ -260,26 +338,94 @@ Keep MVP as one codebase / one image / two process types. Split when measured ne
 - **Introduce projected timeline tables** when derived timeline queries exceed acceptable p95 (or you need complex grouping).
 - **Add Redis** when rate limiting accuracy becomes important or job queue throughput outgrows Postgres-based workers.
 
+## Phase G — Agent Auth Protocol (Post-Revenue, DEFERRED)
+
+**Goal:** Replace coarse org-level API keys with per-agent cryptographic identity. Each agent acts autonomously within its granted capabilities — no human approval gates, no permission prompts. Safety comes from constraints set at provisioning time, not runtime interruptions.
+
+**Why now (after billing, not before):** Agent Auth is the right auth model, but shipping it before revenue is over-engineering. The current API key model works fine for the personal wedge. Agent Auth becomes critical when teams have multiple agents with different permission needs.
+
+**Relationship to Phase E3 auth hardening:** E3 adds `expires_at`, `max_spend_cents`, `allowed_actions` to the existing API key model. Those fields remain useful for org-level keys even after Agent Auth ships. Think of E3 as "hardened API keys for production" and Phase H as "per-agent identity for multi-agent teams." Both coexist — Agent Auth doesn't replace API keys, it adds a layer below them.
+
+**What Agent Auth gives us:**
+- Each agent gets its own Ed25519 keypair + scoped capability grants
+- Constraints on grants: `"payment:send" — max: $500/day, mcc_categories: ["software"]`
+- Independent agent lifecycle: `pending → active → expired → revoked`
+- Three independent clocks: session TTL, max lifetime, absolute lifetime
+- Host → agent hierarchy: revoking a host cascades to all child agents
+- Discovery via `/.well-known/agent-configuration`
+- Complements MCP (Agent Auth = identity/auth, MCP = tool transport)
+
+**Autonomous by design:** The agent operates freely within its capability grants. If an agent has `payment:send` with `max: $500`, it spends up to $500 without asking anyone. If it has `email:send` with `domains: ["@company.com"]`, it sends to those domains instantly. The constraints ARE the safety — not human checkpoints. This is how humans work: your credit card has a limit, your email has a domain, and you don't ask permission for every transaction.
+
+### Planned commits (scope TBD based on traction)
+
+| Commit | What |
+| --- | --- |
+| `feat: /.well-known/agent-configuration` | Discovery endpoint exposing capabilities, supported auth |
+| `feat: agent registration + JWT verification` | `POST /agent/register`, Ed25519 JWT verification alongside existing Bearer tokens |
+| `feat: capability grants with constraints` | Map existing scopes to Agent Auth capabilities, add constraint operators (`max`, `min`, `in`, `not_in`) |
+| `feat: autonomous constraint enforcement` | Policy engine checks constraints at action time — reject if exceeded, execute if within bounds, no approval flow |
+| `test: agent auth e2e` | JWT auth, capability scoping, constraint enforcement, lifecycle states |
+
+**PR → main:** "Phase G: Agent Auth Protocol"
+**Tag:** `v0.6.0`
+
+## Phase H — Payment Receiving + MPP (Post-PMF, DEFERRED)
+
+**Goal:** Close the payment loop. Agents already SEND payments via Stripe Issuing cards. Now let them RECEIVE payments (invoicing, payment links) and PAY for services on the open web via MPP. This is the feature no competitor has.
+
+**Why this matters:** Humans both send and receive money. If agents can only spend but not earn, they're half-functional. Payment receiving + MPP makes AgentConnect the full-stack financial identity for agents.
+
+**Payment receiving (Stripe Connect — separate from Stripe Billing in Phase F):**
+- New resource type: `payment_account` (backed by Stripe Connect Express account per agent — requires migration to extend `resources.type` enum)
+- Agent creates a Stripe Payment Link → shares via email → receives payment
+- Agent creates + sends a Stripe Invoice → tracks payment status
+- Webhook events: `payment.received`, `invoice.paid`, `invoice.overdue`
+- Funds settle into the agent's connected account; org controls payout schedule
+
+**MPP integration (machine-to-machine payments):**
+- Agents with Stripe Issuing cards generate Shared Payment Tokens (SPTs)
+- SPTs let agents pay for any MPP-enabled service (Cloudflare Workers, Browserbase, etc.) automatically via HTTP 402 flow
+- AgentConnect can also ACCEPT MPP payments (charge agents per-request for API usage)
+- Protocol: challenge-credential-receipt over `WWW-Authenticate: Payment` / `Authorization: Payment` headers
+- SDK: `mppx` (TypeScript), production-ready, middleware for Express/Hono
+
+### Planned commits (scope TBD based on ecosystem maturity)
+
+| Commit | What |
+| --- | --- |
+| `feat: payment link creation + sharing` | Agent creates Stripe Payment Link, shares via email resource |
+| `feat: invoice creation + send` | Agent creates Stripe Invoice, sends via email |
+| `feat: payment.received webhook + events` | Ingest Stripe payment webhooks, emit `payment.received` events |
+| `feat: MPP SPT generation for Issuing cards` | Enable agents to generate SPTs from their provisioned Stripe Issuing cards |
+| `feat: MPP payee middleware` | Accept MPP payments on AgentConnect API (optional per-request billing) |
+| `test: payment receiving + MPP e2e` | Payment link flow, invoice flow, SPT generation, MPP challenge-credential-receipt |
+
+**PR → main:** "Phase H: payment receiving + MPP"
+**Tag:** `v0.7.0`
+
 ## Deferred Roadmap (vNext, not MVP)
 
-These remain in your original plan, but moved out of the critical path:
+These remain out of the critical path. Adopt only when real demand appears:
 
 - Generic policies table + full inheritance PolicyEngine
-- Delegated keys + richer key hierarchy
-- Approvals flow + verification URL
-- SMS (then voice)
-- Wallet/x402 adapter
+- SMS adapter (Twilio) — send + receive text messages
+- Voice adapter (Twilio/LiveKit) — make + receive calls, real-time call control
 - Full dashboard (start with OpenAPI + minimal admin page instead)
+- Agent-to-agent delegation chains (Agent Auth Protocol extension)
+- Cross-org agent identity federation
 
 ## Release Milestones (Lean)
 
-| Tag      | What's shippable                                                        |
-| -------- | ----------------------------------------------------------------------- |
-| `v0.1.0` | Single deployable, orgs + API keys, agents                              |
-| `v0.2.0` | Canonical event log + `GET /agents/:id/events`                          |
-| `v0.3.0` | Email end-to-end (provision, send, ingest → events)                     |
-| `v0.4.0` | Card issuance + card webhooks + derived unified timeline                |
-| `v0.5.0` | MCP tools for email/card/events/timeline (+ optional outbound webhooks) |
+| Tag      | What's shippable                                                                          | Status |
+| -------- | ----------------------------------------------------------------------------------------- | ------ |
+| `v0.1.0` | Single deployable, orgs + API keys, agents                                                | Done |
+| `v0.2.0` | Canonical event log + `GET /agents/:id/events`                                            | Done |
+| `v0.3.0` | Email end-to-end (provision, send, ingest → events)                                       | Done |
+| `v0.4.0` | Card issuance + card webhooks + derived unified timeline                                  | Done |
+| `v0.5.0` | MCP gateway + outbound webhooks + billing + quotas + ops readiness + landing page          | Done |
+| `v0.6.0` | Agent Auth Protocol — per-agent cryptographic identity + autonomous constraint enforcement | Deferred |
+| `v0.7.0` | Payment receiving (links + invoicing) + MPP (agent-to-service payments)                   | Deferred |
 
 ## Git Hygiene Reminders
 

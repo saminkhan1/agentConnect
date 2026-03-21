@@ -1,1106 +1,909 @@
-import assert from 'node:assert';
-import crypto from 'node:crypto';
-import test from 'node:test';
+import assert from "node:assert";
+import crypto from "node:crypto";
+import test from "node:test";
 
-import { buildServer } from '../src/api/server';
-import { DalFactory, systemDal } from '../src/db/dal';
-import type { EventWriter, WriteEventResult } from '../src/domain/event-writer';
-import { StripeAdapter } from '../src/adapters/stripe-adapter';
-import type { ParsedWebhookEvent } from '../src/adapters/provider-adapter';
-import { ResourceManager } from '../src/domain/resource-manager';
+import type Stripe from "stripe";
+
+import type {
+	ParsedWebhookEvent,
+	ProviderAdapter,
+} from "../src/adapters/provider-adapter";
 import {
-  FIXED_TIMESTAMP,
-  ResourceRecord,
-  buildAgentRecord,
-  installAgentsDalMock,
-  installAuthApiKey,
-} from './helpers';
+	STRIPE_API_VERSION,
+	StripeAdapter,
+} from "../src/adapters/stripe-adapter";
+import { issueCardBodySchema } from "../src/api/schemas/actions";
+import { buildServer } from "../src/api/server";
+import { type DalFactory, systemDal } from "../src/db/dal";
+import { EVENT_TYPES } from "../src/domain/events";
+import { ResourceManager } from "../src/domain/resource-manager";
+import {
+	buildAgentRecord,
+	buildCardResourceRecord,
+	buildEventRecord,
+	FIXED_TIMESTAMP,
+	installAgentsDalMock,
+	installAuthApiKey,
+	installEventsDalMock,
+	installEventWriterMock,
+	installResourceManagerMock,
+	installResourcesDalMock,
+	installStripeAdapterMock,
+} from "./helpers";
 
-// ---------------------------------------------------------------------------
-// Fixture builders
-// ---------------------------------------------------------------------------
-
-function buildCardResourceRecord(overrides?: Partial<ResourceRecord>): ResourceRecord {
-  return {
-    id: 'res_card_123',
-    orgId: 'org_123',
-    agentId: 'agt_123',
-    type: 'card',
-    provider: 'stripe',
-    providerRef: 'ic_test123',
-    providerOrgId: null,
-    config: { cardholder_id: 'ich_test', last4: '4242', exp_month: 12, exp_year: 2027 },
-    state: 'active',
-    createdAt: FIXED_TIMESTAMP,
-    updatedAt: FIXED_TIMESTAMP,
-    ...overrides,
-  };
-}
-
-function buildFakeCardEventRecord(overrides?: Record<string, unknown>) {
-  return {
-    id: crypto.randomUUID(),
-    orgId: 'org_123',
-    agentId: 'agt_123',
-    resourceId: 'res_card_123',
-    provider: 'stripe',
-    providerEventId: null,
-    eventType: 'payment.card.issued' as const,
-    occurredAt: FIXED_TIMESTAMP,
-    idempotencyKey: null,
-    data: { card_id: 'ic_test123' },
-    ingestedAt: FIXED_TIMESTAMP,
-    ...overrides,
-  };
-}
-
-type EventRecord = ReturnType<typeof buildFakeCardEventRecord>;
-
-// ---------------------------------------------------------------------------
-// Test helpers
-// ---------------------------------------------------------------------------
-
-function installResourceManagerMock(
-  server: Awaited<ReturnType<typeof buildServer>>,
-  methods: Partial<ResourceManager>,
-) {
-  const original = server.resourceManager;
-  server.resourceManager = methods as ResourceManager;
-  return () => {
-    server.resourceManager = original;
-  };
-}
-
-function installResourcesDalMock(methods: {
-  findById?: (id: string) => Promise<ResourceRecord | null>;
-}) {
-  const originalDescriptor = Object.getOwnPropertyDescriptor(DalFactory.prototype, 'resources');
-  Object.defineProperty(DalFactory.prototype, 'resources', {
-    configurable: true,
-    get() {
-      return methods;
-    },
-  });
-  return () => {
-    if (originalDescriptor) {
-      Object.defineProperty(DalFactory.prototype, 'resources', originalDescriptor);
-    }
-  };
-}
-
-function installEventsDalMock(methods: {
-  findByIdempotencyKey?: (idempotencyKey: string) => Promise<EventRecord | null>;
-}) {
-  const originalDescriptor = Object.getOwnPropertyDescriptor(DalFactory.prototype, 'events');
-  Object.defineProperty(DalFactory.prototype, 'events', {
-    configurable: true,
-    get() {
-      return methods;
-    },
-  });
-  return () => {
-    if (originalDescriptor) {
-      Object.defineProperty(DalFactory.prototype, 'events', originalDescriptor);
-    }
-  };
-}
-
-function installStripeAdapterMock(
-  server: Awaited<ReturnType<typeof buildServer>>,
-  methods: Partial<StripeAdapter>,
-) {
-  const original = server.stripeAdapter;
-  server.stripeAdapter = methods as StripeAdapter;
-  return () => {
-    server.stripeAdapter = original;
-  };
-}
-
-function installEventWriterMock(
-  server: Awaited<ReturnType<typeof buildServer>>,
-  methods: Partial<EventWriter>,
-) {
-  const original = server.eventWriter;
-  server.eventWriter = methods as EventWriter;
-  server.webhookProcessor = new (server.webhookProcessor.constructor as new (
-    ew: EventWriter,
-  ) => typeof server.webhookProcessor)(server.eventWriter);
-  return () => {
-    server.eventWriter = original;
-  };
-}
-
-// Stripe webhook signing: t={ts},v1={HMAC-SHA256(`{ts}.{body}`, secret)}
 function buildStripeWebhookHeaders(body: string, secret: string) {
-  const ts = String(Math.floor(Date.now() / 1000));
-  const sig = crypto.createHmac('sha256', secret).update(`${ts}.${body}`).digest('hex');
-  return {
-    'stripe-signature': `t=${ts},v1=${sig}`,
-    'content-type': 'application/json',
-  };
+	const timestamp = String(Math.floor(Date.now() / 1000));
+	const signature = crypto
+		.createHmac("sha256", secret)
+		.update(`${timestamp}.${body}`)
+		.digest("hex");
+
+	return {
+		"content-type": "application/json",
+		"stripe-signature": `t=${timestamp},v1=${signature}`,
+	};
 }
 
-function buildAuthorizationWebhookPayload(approved: boolean, overrides?: Record<string, unknown>) {
-  return JSON.stringify({
-    id: 'evt_auth_001',
-    type: 'issuing_authorization.created',
-    created: Math.floor(FIXED_TIMESTAMP.getTime() / 1000),
-    data: {
-      object: {
-        id: 'iauth_001',
-        card: { id: 'ic_test123' },
-        approved,
-        amount: 5000,
-        currency: 'usd',
-      },
-    },
-    ...overrides,
-  });
-}
-
-function buildTransactionWebhookPayload(overrides?: Record<string, unknown>) {
-  return JSON.stringify({
-    id: 'evt_txn_001',
-    type: 'issuing_transaction.created',
-    created: Math.floor(FIXED_TIMESTAMP.getTime() / 1000),
-    data: {
-      object: {
-        id: 'ipi_001',
-        card: 'ic_test123',
-        amount: -5000,
-        currency: 'usd',
-        authorization: 'iauth_001',
-      },
-    },
-    ...overrides,
-  });
+function buildIssueCardPayload(overrides?: Record<string, unknown>) {
+	return {
+		cardholder_name: "Agent Tester",
+		billing_address: {
+			line1: "123 Market St",
+			city: "San Francisco",
+			postal_code: "94105",
+			country: "US",
+		},
+		currency: "usd",
+		spending_limits: [{ amount: 5000, interval: "per_authorization" }],
+		...overrides,
+	};
 }
 
 // ---------------------------------------------------------------------------
-// issue_card action tests
+// Card capability guard — 422 when Stripe adapter is absent
 // ---------------------------------------------------------------------------
 
-void test('POST /agents/:id/actions/issue_card returns 404 when agent is archived', async () => {
-  const server = await buildServer();
-  const { authorizationHeader, restore } = await installAuthApiKey(server);
-  const archivedAgent = buildAgentRecord({ isArchived: true });
-  const restoreAgents = installAgentsDalMock({ findById: () => Promise.resolve(archivedAgent) });
+void test("POST /agents/:id/actions/issue_card returns 422 when Stripe adapter is not configured", async () => {
+	const server = await buildServer();
+	const { authorizationHeader, restore } = await installAuthApiKey(server);
+	const restoreAgents = installAgentsDalMock({
+		findById: () => Promise.resolve(buildAgentRecord()),
+	});
 
-  try {
-    const response = await server.inject({
-      method: 'POST',
-      url: '/agents/agt_123/actions/issue_card',
-      headers: { authorization: authorizationHeader },
-      payload: { spending_limits: [{ amount: 5000, interval: 'per_authorization' }] },
-    });
+	const originalAdapter = server.stripeAdapter;
+	server.stripeAdapter = undefined;
 
-    assert.strictEqual(response.statusCode, 404);
-    const body = JSON.parse(response.payload) as { message: string };
-    assert.strictEqual(body.message, 'Agent not found');
-  } finally {
-    restore();
-    restoreAgents();
-    await server.close();
-  }
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/agents/agt_123/actions/issue_card",
+			headers: { authorization: authorizationHeader },
+			payload: buildIssueCardPayload(),
+		});
+
+		assert.strictEqual(response.statusCode, 422);
+		assert.match(
+			response.json<{ message: string }>().message,
+			/card capabilities/i,
+		);
+	} finally {
+		server.stripeAdapter = originalAdapter;
+		restoreAgents();
+		restore();
+		await server.close();
+	}
 });
 
-void test('POST /agents/:id/actions/issue_card returns 500 when Stripe not configured', async () => {
-  const server = await buildServer();
-  const { authorizationHeader, restore } = await installAuthApiKey(server);
-  const agent = buildAgentRecord();
-  const restoreAgents = installAgentsDalMock({ findById: () => Promise.resolve(agent) });
+void test("POST /agents/:id/actions/create_card_details_session returns 422 when Stripe adapter is not configured", async () => {
+	const server = await buildServer();
+	const { authorizationHeader, restore } = await installAuthApiKey(server, {
+		keyType: "root",
+	});
+	const agent = buildAgentRecord();
+	const resource = buildCardResourceRecord();
+	const restoreAgents = installAgentsDalMock({
+		findById: () => Promise.resolve(agent),
+	});
+	const restoreResources = installResourcesDalMock({
+		findById: () => Promise.resolve(resource),
+	});
 
-  // Ensure stripeAdapter is undefined
-  const original = server.stripeAdapter;
-  server.stripeAdapter = undefined;
+	const originalAdapter = server.stripeAdapter;
+	server.stripeAdapter = undefined;
 
-  try {
-    const response = await server.inject({
-      method: 'POST',
-      url: '/agents/agt_123/actions/issue_card',
-      headers: { authorization: authorizationHeader },
-      payload: { spending_limits: [{ amount: 5000, interval: 'per_authorization' }] },
-    });
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/agents/agt_123/actions/create_card_details_session",
+			headers: { authorization: authorizationHeader },
+			payload: { resource_id: "res_card_123", nonce: "nonce_123" },
+		});
 
-    assert.strictEqual(response.statusCode, 500);
-    const body = JSON.parse(response.payload) as { message: string };
-    assert.ok(body.message.toLowerCase().includes('stripe'));
-  } finally {
-    server.stripeAdapter = original;
-    restore();
-    restoreAgents();
-    await server.close();
-  }
+		assert.strictEqual(response.statusCode, 422);
+		assert.match(
+			response.json<{ message: string }>().message,
+			/card capabilities/i,
+		);
+	} finally {
+		server.stripeAdapter = originalAdapter;
+		restoreResources();
+		restoreAgents();
+		restore();
+		await server.close();
+	}
 });
 
-void test('POST /agents/:id/actions/issue_card returns 200 with card details and emits payment.card.issued', async () => {
-  const server = await buildServer();
-  const { authorizationHeader, restore } = await installAuthApiKey(server);
-  const agent = buildAgentRecord();
-  const resource = buildCardResourceRecord();
-  const sensitiveData = {
-    number: '4242424242424242',
-    cvc: '123',
-    exp_month: 12,
-    exp_year: 2027,
-    last4: '4242',
-  };
-  const fakeEvent = buildFakeCardEventRecord();
+void test("POST /agents/:id/resources returns 422 for card type when Stripe adapter is not configured", async () => {
+	const server = await buildServer();
+	const { authorizationHeader, restore } = await installAuthApiKey(server);
+	const restoreAgents = installAgentsDalMock({
+		findById: () => Promise.resolve(buildAgentRecord()),
+	});
 
-  const writeEventCalls: unknown[] = [];
+	const originalAdapter = server.stripeAdapter;
+	server.stripeAdapter = undefined;
 
-  const restoreAgents = installAgentsDalMock({ findById: () => Promise.resolve(agent) });
-  // Ensure stripeAdapter is present (route checks for it before calling resourceManager)
-  const restoreAdapter = installStripeAdapterMock(server, {});
-  const restoreRM = installResourceManagerMock(server, {
-    provision: () => Promise.resolve({ resource, sensitiveData }),
-  });
-  const restoreWriter = installEventWriterMock(server, {
-    writeEvent: (input) => {
-      writeEventCalls.push(input);
-      return Promise.resolve({ event: fakeEvent, wasCreated: true } as WriteEventResult);
-    },
-  });
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/agents/agt_123/resources",
+			headers: { authorization: authorizationHeader },
+			payload: { type: "card", provider: "stripe", config: {} },
+		});
 
-  try {
-    const response = await server.inject({
-      method: 'POST',
-      url: '/agents/agt_123/actions/issue_card',
-      headers: { authorization: authorizationHeader },
-      payload: { spending_limits: [{ amount: 5000, interval: 'per_authorization' }] },
-    });
-
-    assert.strictEqual(response.statusCode, 200);
-
-    const body = JSON.parse(response.payload) as {
-      resource: { id: string; type: string; provider: string; providerRef: string };
-      card: { number: string; cvc: string; exp_month: number; exp_year: number; last4: string };
-      event: { eventType: string; data: Record<string, unknown> };
-    };
-
-    // Card details returned once
-    assert.strictEqual(body.card.number, '4242424242424242');
-    assert.strictEqual(body.card.cvc, '123');
-    assert.strictEqual(body.card.last4, '4242');
-
-    // Resource has ic_... as providerRef
-    assert.strictEqual(body.resource.providerRef, 'ic_test123');
-    assert.strictEqual(body.resource.type, 'card');
-    assert.strictEqual(body.resource.provider, 'stripe');
-
-    // Event emitted with correct type and card_id (not PAN/CVC)
-    assert.strictEqual(writeEventCalls.length, 1);
-    const eventInput = writeEventCalls[0] as Record<string, unknown>;
-    assert.strictEqual(eventInput['eventType'], 'payment.card.issued');
-    const eventData = eventInput['data'] as Record<string, unknown>;
-    assert.strictEqual(eventData['card_id'], 'ic_test123');
-    assert.ok(!('number' in eventData), 'PAN must not be in event data');
-    assert.ok(!('cvc' in eventData), 'CVC must not be in event data');
-  } finally {
-    restore();
-    restoreAgents();
-    restoreAdapter();
-    restoreRM();
-    restoreWriter();
-    await server.close();
-  }
-});
-
-void test('POST /agents/:id/actions/issue_card replays an existing issuance for the same idempotency key', async () => {
-  const server = await buildServer();
-  const { authorizationHeader, restore } = await installAuthApiKey(server);
-  const agent = buildAgentRecord();
-  const resource = buildCardResourceRecord({
-    config: {
-      billing_name: agent.name,
-      spending_limits: [{ amount: 5000, interval: 'per_authorization' }],
-      cardholder_id: 'ich_test',
-      last4: '4242',
-      exp_month: 12,
-      exp_year: 2027,
-    },
-  });
-  const fakeEvent = buildFakeCardEventRecord({
-    resourceId: resource.id,
-    idempotencyKey: 'idem-card-001',
-  });
-
-  let provisionCalls = 0;
-
-  const restoreAgents = installAgentsDalMock({ findById: () => Promise.resolve(agent) });
-  const restoreEvents = installEventsDalMock({
-    findByIdempotencyKey: () => Promise.resolve(fakeEvent),
-  });
-  const restoreResources = installResourcesDalMock({
-    findById: () => Promise.resolve(resource),
-  });
-  const restoreAdapter = installStripeAdapterMock(server, {});
-  const restoreRM = installResourceManagerMock(server, {
-    provision: () => {
-      provisionCalls += 1;
-      return Promise.resolve({ resource });
-    },
-  });
-
-  try {
-    const response = await server.inject({
-      method: 'POST',
-      url: '/agents/agt_123/actions/issue_card',
-      headers: { authorization: authorizationHeader },
-      payload: {
-        spending_limits: [{ amount: 5000, interval: 'per_authorization' }],
-        idempotency_key: 'idem-card-001',
-      },
-    });
-
-    assert.strictEqual(response.statusCode, 200);
-
-    const body = JSON.parse(response.payload) as {
-      resource: { id: string };
-      card: { number: string | null; cvc: string | null; exp_month: number; exp_year: number };
-      event: { eventType: string; idempotencyKey: string | null };
-    };
-
-    assert.strictEqual(provisionCalls, 0);
-    assert.strictEqual(body.resource.id, resource.id);
-    assert.strictEqual(body.card.number, null);
-    assert.strictEqual(body.card.cvc, null);
-    assert.strictEqual(body.card.exp_month, 12);
-    assert.strictEqual(body.card.exp_year, 2027);
-    assert.strictEqual(body.event.eventType, 'payment.card.issued');
-    assert.strictEqual(body.event.idempotencyKey, 'idem-card-001');
-  } finally {
-    restore();
-    restoreAgents();
-    restoreEvents();
-    restoreResources();
-    restoreAdapter();
-    restoreRM();
-    await server.close();
-  }
-});
-
-void test('POST /agents/:id/actions/issue_card replays after an agent rename without requiring Stripe config', async () => {
-  const server = await buildServer();
-  const { authorizationHeader, restore } = await installAuthApiKey(server);
-  const currentAgent = buildAgentRecord({ name: 'concierge-agent-renamed' });
-  const resource = buildCardResourceRecord({
-    config: {
-      billing_name: 'concierge-agent',
-      spending_limits: [{ amount: 5000, interval: 'per_authorization' }],
-      cardholder_id: 'ich_test',
-      last4: '4242',
-      exp_month: 12,
-      exp_year: 2027,
-    },
-  });
-  const fakeEvent = buildFakeCardEventRecord({
-    resourceId: resource.id,
-    idempotencyKey: 'idem-card-rename',
-  });
-
-  let provisionCalls = 0;
-
-  const restoreAgents = installAgentsDalMock({ findById: () => Promise.resolve(currentAgent) });
-  const restoreEvents = installEventsDalMock({
-    findByIdempotencyKey: () => Promise.resolve(fakeEvent),
-  });
-  const restoreResources = installResourcesDalMock({
-    findById: () => Promise.resolve(resource),
-  });
-  const originalAdapter = server.stripeAdapter;
-  server.stripeAdapter = undefined;
-  const restoreRM = installResourceManagerMock(server, {
-    provision: () => {
-      provisionCalls += 1;
-      return Promise.resolve({ resource });
-    },
-  });
-
-  try {
-    const response = await server.inject({
-      method: 'POST',
-      url: '/agents/agt_123/actions/issue_card',
-      headers: { authorization: authorizationHeader },
-      payload: {
-        spending_limits: [{ amount: 5000, interval: 'per_authorization' }],
-        idempotency_key: 'idem-card-rename',
-      },
-    });
-
-    assert.strictEqual(response.statusCode, 200);
-    assert.strictEqual(provisionCalls, 0);
-
-    const body = JSON.parse(response.payload) as {
-      resource: { id: string };
-      event: { idempotencyKey: string | null };
-    };
-    assert.strictEqual(body.resource.id, resource.id);
-    assert.strictEqual(body.event.idempotencyKey, 'idem-card-rename');
-  } finally {
-    server.stripeAdapter = originalAdapter;
-    restore();
-    restoreAgents();
-    restoreEvents();
-    restoreResources();
-    restoreRM();
-    await server.close();
-  }
-});
-
-void test('POST /agents/:id/actions/issue_card returns 409 when an org key is already tied to another agent', async () => {
-  const server = await buildServer();
-  const { authorizationHeader, restore } = await installAuthApiKey(server);
-  const agent = buildAgentRecord();
-  let provisionCalls = 0;
-
-  const restoreAgents = installAgentsDalMock({ findById: () => Promise.resolve(agent) });
-  const restoreEvents = installEventsDalMock({
-    findByIdempotencyKey: () => Promise.resolve(null),
-  });
-  const restoreResources = installResourcesDalMock({
-    findById: () =>
-      Promise.resolve(
-        buildCardResourceRecord({
-          id: 'res_conflict',
-          agentId: 'agt_other',
-          config: {
-            billing_name: agent.name,
-            spending_limits: [{ amount: 5000, interval: 'per_authorization' }],
-            cardholder_id: 'ich_test',
-            last4: '4242',
-            exp_month: 12,
-            exp_year: 2027,
-          },
-          state: 'provisioning',
-        }),
-      ),
-  });
-  const restoreAdapter = installStripeAdapterMock(server, {});
-  const restoreRM = installResourceManagerMock(server, {
-    provision: () => {
-      provisionCalls += 1;
-      return Promise.resolve({ resource: buildCardResourceRecord({ agentId: 'agt_other' }) });
-    },
-  });
-
-  try {
-    const response = await server.inject({
-      method: 'POST',
-      url: '/agents/agt_123/actions/issue_card',
-      headers: { authorization: authorizationHeader },
-      payload: {
-        spending_limits: [{ amount: 5000, interval: 'per_authorization' }],
-        idempotency_key: 'idem-card-001',
-      },
-    });
-
-    assert.strictEqual(response.statusCode, 409);
-    assert.strictEqual(provisionCalls, 0);
-    const body = JSON.parse(response.payload) as { message: string };
-    assert.strictEqual(body.message, 'Idempotency key already used for a different action');
-  } finally {
-    restore();
-    restoreAgents();
-    restoreEvents();
-    restoreResources();
-    restoreAdapter();
-    restoreRM();
-    await server.close();
-  }
-});
-
-void test('POST /agents/:id/actions/issue_card rejects invalid Stripe spending controls before provisioning', async () => {
-  const server = await buildServer();
-  const { authorizationHeader, restore } = await installAuthApiKey(server);
-  const agent = buildAgentRecord();
-  const restoreAgents = installAgentsDalMock({ findById: () => Promise.resolve(agent) });
-
-  try {
-    for (const invalidCountryCode of ['zz', 'EU', 'UN']) {
-      const response = await server.inject({
-        method: 'POST',
-        url: '/agents/agt_123/actions/issue_card',
-        headers: { authorization: authorizationHeader },
-        payload: {
-          spending_limits: [{ amount: 5000, interval: 'per_authorization' }],
-          allowed_categories: ['not_a_real_category'],
-          allowed_merchant_countries: [invalidCountryCode],
-        },
-      });
-
-      assert.strictEqual(response.statusCode, 400);
-    }
-  } finally {
-    restore();
-    restoreAgents();
-    await server.close();
-  }
-});
-
-void test('POST /agents/:id/actions/issue_card: resource config does not contain PAN or CVC', async () => {
-  const server = await buildServer();
-  const { authorizationHeader, restore } = await installAuthApiKey(server);
-  const agent = buildAgentRecord();
-  // Resource config only contains safe fields — no PAN/CVC
-  const resource = buildCardResourceRecord({
-    config: { cardholder_id: 'ich_test', last4: '4242', exp_month: 12, exp_year: 2027 },
-  });
-  const sensitiveData = {
-    number: '4242424242424242',
-    cvc: '123',
-    exp_month: 12,
-    exp_year: 2027,
-    last4: '4242',
-  };
-  const fakeEvent = buildFakeCardEventRecord();
-
-  const provisionCalls: unknown[] = [];
-  const restoreAgents = installAgentsDalMock({ findById: () => Promise.resolve(agent) });
-  const restoreAdapter = installStripeAdapterMock(server, {});
-  const restoreRM = installResourceManagerMock(server, {
-    provision: (...args) => {
-      provisionCalls.push(args);
-      return Promise.resolve({ resource, sensitiveData });
-    },
-  });
-  const restoreWriter = installEventWriterMock(server, {
-    writeEvent: () => Promise.resolve({ event: fakeEvent, wasCreated: true } as WriteEventResult),
-  });
-
-  try {
-    const response = await server.inject({
-      method: 'POST',
-      url: '/agents/agt_123/actions/issue_card',
-      headers: { authorization: authorizationHeader },
-      payload: {
-        spending_limits: [{ amount: 5000, interval: 'per_authorization' }],
-      },
-    });
-
-    assert.strictEqual(response.statusCode, 200);
-
-    // The resource config from provision (what gets persisted) must not contain PAN/CVC
-    const body = JSON.parse(response.payload) as { resource: { config: Record<string, unknown> } };
-    assert.ok(!('number' in body.resource.config), 'PAN must not be in resource config');
-    assert.ok(!('cvc' in body.resource.config), 'CVC must not be in resource config');
-  } finally {
-    restore();
-    restoreAgents();
-    restoreAdapter();
-    restoreRM();
-    restoreWriter();
-    await server.close();
-  }
-});
-
-void test('StripeAdapter.provision activates cards and deactivates cardholders on failure', async () => {
-  const adapter = new StripeAdapter('sk_test_123', 'whsec_test_123');
-
-  const calls: Array<{ id: string; payload: Record<string, unknown> }> = [];
-  let createPayload: Record<string, unknown> | null = null;
-
-  (
-    adapter as unknown as {
-      stripe: {
-        issuing: {
-          cardholders: {
-            create: (payload: Record<string, unknown>) => Promise<{ id: string }>;
-            update: (
-              id: string,
-              payload: Record<string, unknown>,
-            ) => Promise<Record<string, unknown>>;
-          };
-          cards: {
-            create: (payload: Record<string, unknown>) => Promise<never>;
-          };
-        };
-      };
-    }
-  ).stripe = {
-    issuing: {
-      cardholders: {
-        create: () => Promise.resolve({ id: 'ich_test' }),
-        update: (id, payload) => {
-          calls.push({ id, payload });
-          return Promise.resolve({});
-        },
-      },
-      cards: {
-        create: (payload) => {
-          createPayload = payload;
-          return Promise.reject(new Error('card create failed'));
-        },
-      },
-    },
-  };
-
-  await assert.rejects(() =>
-    adapter.provision('agt_123', {
-      billing_name: 'Agent One',
-      spending_limits: [{ amount: 5000, interval: 'per_authorization' }],
-    }),
-  );
-
-  assert.ok(createPayload);
-  assert.strictEqual(createPayload['status'], 'active');
-  assert.deepStrictEqual(calls, [{ id: 'ich_test', payload: { status: 'inactive' } }]);
-});
-
-void test('StripeAdapter.deprovision cancels cards and deactivates cardholders', async () => {
-  const adapter = new StripeAdapter('sk_test_123', 'whsec_test_123');
-
-  const calls: Array<{
-    target: 'card' | 'cardholder';
-    id: string;
-    payload: Record<string, unknown>;
-  }> = [];
-
-  (
-    adapter as unknown as {
-      stripe: {
-        issuing: {
-          cardholders: {
-            update: (
-              id: string,
-              payload: Record<string, unknown>,
-            ) => Promise<Record<string, unknown>>;
-          };
-          cards: {
-            update: (
-              id: string,
-              payload: Record<string, unknown>,
-            ) => Promise<Record<string, unknown>>;
-          };
-        };
-      };
-    }
-  ).stripe = {
-    issuing: {
-      cardholders: {
-        update: (id, payload) => {
-          calls.push({ target: 'cardholder', id, payload });
-          return Promise.resolve({});
-        },
-      },
-      cards: {
-        update: (id, payload) => {
-          calls.push({ target: 'card', id, payload });
-          return Promise.resolve({});
-        },
-      },
-    },
-  };
-
-  await adapter.deprovision(
-    buildCardResourceRecord({
-      config: { cardholder_id: 'ich_test', last4: '4242', exp_month: 12, exp_year: 2027 },
-    }),
-  );
-
-  assert.deepStrictEqual(calls, [
-    { target: 'card', id: 'ic_test123', payload: { status: 'canceled' } },
-    { target: 'cardholder', id: 'ich_test', payload: { status: 'inactive' } },
-  ]);
-});
-
-void test('ResourceManager.provision deprovisions a Stripe card when DB activation fails', async () => {
-  const adapterCalls: Array<{ kind: 'provision' | 'deprovision'; resource?: ResourceRecord }> = [];
-  const adapter = {
-    providerName: 'stripe' as const,
-    provision: () => {
-      adapterCalls.push({ kind: 'provision' });
-      return Promise.resolve({
-        providerRef: 'ic_test123',
-        config: {
-          cardholder_id: 'ich_test',
-          last4: '4242',
-          exp_month: 12,
-          exp_year: 2027,
-        },
-      });
-    },
-    deprovision: (resource: ResourceRecord) => {
-      adapterCalls.push({ kind: 'deprovision', resource });
-      return Promise.resolve({});
-    },
-    performAction: () => Promise.resolve({}),
-    verifyWebhook: () => Promise.resolve(true),
-    parseWebhook: () => Promise.resolve([]),
-  };
-  const resourceManager = new ResourceManager(new Map([['stripe', adapter]]));
-  let activeUpdateAttempted = false;
-
-  const dal = {
-    resources: {
-      findById: () => Promise.resolve(null),
-      insert: (data: Record<string, unknown>) =>
-        Promise.resolve(
-          buildCardResourceRecord({
-            id: data['id'] as string,
-            providerRef: null,
-            providerOrgId: null,
-            config: data['config'] as Record<string, unknown>,
-            state: 'provisioning',
-          }),
-        ),
-      updateById: (_id: string, data: Record<string, unknown>) => {
-        if (data['state'] === 'active' && !activeUpdateAttempted) {
-          activeUpdateAttempted = true;
-          return Promise.reject(new Error('db write failed'));
-        }
-
-        const providerRef = typeof data['providerRef'] === 'string' ? data['providerRef'] : null;
-        const providerOrgId =
-          typeof data['providerOrgId'] === 'string' ? data['providerOrgId'] : null;
-        const config =
-          typeof data['config'] === 'object' && data['config'] !== null
-            ? (data['config'] as Record<string, unknown>)
-            : {};
-        const state = data['state'];
-
-        return Promise.resolve(
-          buildCardResourceRecord({
-            providerRef,
-            providerOrgId,
-            config,
-            state:
-              state === 'provisioning' ||
-              state === 'active' ||
-              state === 'suspended' ||
-              state === 'deleted'
-                ? state
-                : 'active',
-          }),
-        );
-      },
-    },
-  } as unknown as DalFactory;
-
-  await assert.rejects(() =>
-    resourceManager.provision(
-      dal,
-      'agt_123',
-      'card',
-      'stripe',
-      {
-        billing_name: 'Agent One',
-        spending_limits: [{ amount: 5000, interval: 'per_authorization' }],
-      },
-      { resourceId: 'res_card_rollback' },
-    ),
-  );
-
-  assert.deepStrictEqual(
-    adapterCalls.map((call) => call.kind),
-    ['provision', 'deprovision'],
-  );
-  const deprovisionCall = adapterCalls[1];
-  assert.strictEqual(deprovisionCall.kind, 'deprovision');
-  assert.ok(deprovisionCall.resource);
-  assert.strictEqual(deprovisionCall.resource.providerRef, 'ic_test123');
-  assert.strictEqual(deprovisionCall.resource.config['cardholder_id'], 'ich_test');
-});
-
-void test('StripeAdapter.parseWebhook preserves refund sign and type metadata', async () => {
-  const adapter = new StripeAdapter('sk_test_123', 'whsec_test_123');
-  const payload = JSON.stringify({
-    id: 'evt_refund_001',
-    type: 'issuing_transaction.created',
-    created: Math.floor(FIXED_TIMESTAMP.getTime() / 1000),
-    data: {
-      object: {
-        id: 'ipi_refund_001',
-        card: 'ic_test123',
-        amount: -5000,
-        currency: 'usd',
-        authorization: 'iauth_001',
-        type: 'refund',
-      },
-    },
-  });
-
-  const [event] = await adapter.parseWebhook(Buffer.from(payload), {});
-  assert.ok(event);
-  assert.strictEqual(event.eventType, 'payment.card.settled');
-  assert.strictEqual(event.resourceRef, 'ic_test123');
-  assert.deepStrictEqual(event.data, {
-    transaction_id: 'ipi_refund_001',
-    authorization_id: 'iauth_001',
-    amount: -5000,
-    currency: 'USD',
-    transaction_type: 'refund',
-  });
-});
-
-void test('StripeAdapter.parseWebhook accepts string card IDs on authorization webhooks', async () => {
-  const adapter = new StripeAdapter('sk_test_123', 'whsec_test_123');
-  const payload = JSON.stringify({
-    id: 'evt_auth_string_001',
-    type: 'issuing_authorization.created',
-    created: Math.floor(FIXED_TIMESTAMP.getTime() / 1000),
-    data: {
-      object: {
-        id: 'iauth_string_001',
-        card: 'ic_test123',
-        approved: false,
-        amount: 5000,
-        currency: 'usd',
-      },
-    },
-  });
-
-  const [event] = await adapter.parseWebhook(Buffer.from(payload), {});
-  assert.ok(event);
-  assert.strictEqual(event.eventType, 'payment.card.declined');
-  assert.strictEqual(event.resourceRef, 'ic_test123');
-  assert.deepStrictEqual(event.data, {
-    authorization_id: 'iauth_string_001',
-    amount: 5000,
-    currency: 'USD',
-  });
+		assert.strictEqual(response.statusCode, 422);
+		assert.match(
+			response.json<{ message: string }>().message,
+			/card capabilities/i,
+		);
+	} finally {
+		server.stripeAdapter = originalAdapter;
+		restoreAgents();
+		restore();
+		await server.close();
+	}
 });
 
 // ---------------------------------------------------------------------------
-// Stripe webhook endpoint tests
-// ---------------------------------------------------------------------------
 
-const STRIPE_TEST_SECRET = 'stripe_test_webhook_secret_for_unit_tests';
+void test("POST /agents/:id/actions/issue_card rejects missing explicit Stripe cardholder fields", async () => {
+	const server = await buildServer();
+	const { authorizationHeader, restore } = await installAuthApiKey(server);
 
-void test('POST /webhooks/stripe returns 401 for invalid signature', async () => {
-  const server = await buildServer();
-  const body = buildAuthorizationWebhookPayload(true);
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/agents/agt_123/actions/issue_card",
+			headers: { authorization: authorizationHeader },
+			payload: {
+				spending_limits: [{ amount: 5000, interval: "per_authorization" }],
+			},
+		});
 
-  const restoreAdapter = installStripeAdapterMock(server, {
-    verifyWebhook: () => Promise.resolve(false),
-  });
-
-  try {
-    const response = await server.inject({
-      method: 'POST',
-      url: '/webhooks/stripe',
-      headers: { 'stripe-signature': 'invalid', 'content-type': 'application/json' },
-      payload: body,
-    });
-
-    assert.strictEqual(response.statusCode, 401);
-  } finally {
-    restoreAdapter();
-    await server.close();
-  }
+		assert.strictEqual(response.statusCode, 400);
+		assert.match(
+			response.json<{ message: string }>().message,
+			/cardholder_name/i,
+		);
+	} finally {
+		restore();
+		await server.close();
+	}
 });
 
-void test('POST /webhooks/stripe: approved authorization → payment.card.authorized', async () => {
-  const server = await buildServer();
-  const bodyStr = buildAuthorizationWebhookPayload(true);
-  const headers = buildStripeWebhookHeaders(bodyStr, STRIPE_TEST_SECRET);
-  const resource = buildCardResourceRecord();
-  const writeEventCalls: unknown[] = [];
+void test("POST /agents/:id/actions/issue_card rejects mutually exclusive Stripe spending controls", async () => {
+	const server = await buildServer();
+	const { authorizationHeader, restore } = await installAuthApiKey(server);
 
-  const originalFind = systemDal.findResourceByProviderRef.bind(systemDal);
-  systemDal.findResourceByProviderRef = () => Promise.resolve(resource);
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/agents/agt_123/actions/issue_card",
+			headers: { authorization: authorizationHeader },
+			payload: buildIssueCardPayload({
+				allowed_categories: ["advertising_services"],
+				blocked_categories: ["art_dealers_and_galleries"],
+			}),
+		});
 
-  const restoreAdapter = installStripeAdapterMock(server, {
-    verifyWebhook: () => Promise.resolve(true),
-    parseWebhook: () =>
-      Promise.resolve([
-        {
-          resourceRef: 'ic_test123',
-          provider: 'stripe',
-          providerEventId: 'evt_auth_001',
-          eventType: 'payment.card.authorized',
-          occurredAt: FIXED_TIMESTAMP,
-          data: { authorization_id: 'iauth_001', amount: 5000, currency: 'USD' },
-        } satisfies ParsedWebhookEvent,
-      ]),
-  });
-  const restoreWriter = installEventWriterMock(server, {
-    writeEvent: (input) => {
-      writeEventCalls.push(input);
-      return Promise.resolve({
-        event: buildFakeCardEventRecord({ eventType: 'payment.card.authorized' }),
-        wasCreated: true,
-      } as WriteEventResult);
-    },
-  });
-
-  try {
-    const response = await server.inject({
-      method: 'POST',
-      url: '/webhooks/stripe',
-      headers,
-      payload: bodyStr,
-    });
-
-    assert.strictEqual(response.statusCode, 200);
-    assert.strictEqual(writeEventCalls.length, 1);
-    const input = writeEventCalls[0] as Record<string, unknown>;
-    assert.strictEqual(input['eventType'], 'payment.card.authorized');
-    assert.strictEqual(input['providerEventId'], 'evt_auth_001');
-  } finally {
-    systemDal.findResourceByProviderRef = originalFind;
-    restoreAdapter();
-    restoreWriter();
-    await server.close();
-  }
+		assert.strictEqual(response.statusCode, 400);
+		assert.match(
+			response.json<{ message: string }>().message,
+			/mutually exclusive/i,
+		);
+	} finally {
+		restore();
+		await server.close();
+	}
 });
 
-void test('POST /webhooks/stripe: declined authorization → payment.card.declined', async () => {
-  const server = await buildServer();
-  const bodyStr = buildAuthorizationWebhookPayload(false);
-  const headers = buildStripeWebhookHeaders(bodyStr, STRIPE_TEST_SECRET);
-  const resource = buildCardResourceRecord();
-  const writeEventCalls: unknown[] = [];
+void test("POST /agents/:id/actions/create_card_details_session requires a root key", async () => {
+	const server = await buildServer();
+	const { authorizationHeader, restore } = await installAuthApiKey(server, {
+		keyType: "service",
+	});
 
-  const originalFind = systemDal.findResourceByProviderRef.bind(systemDal);
-  systemDal.findResourceByProviderRef = () => Promise.resolve(resource);
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/agents/agt_123/actions/create_card_details_session",
+			headers: { authorization: authorizationHeader },
+			payload: { resource_id: "res_card_123", nonce: "nonce_123" },
+		});
 
-  const restoreAdapter = installStripeAdapterMock(server, {
-    verifyWebhook: () => Promise.resolve(true),
-    parseWebhook: () =>
-      Promise.resolve([
-        {
-          resourceRef: 'ic_test123',
-          provider: 'stripe',
-          providerEventId: 'evt_auth_002',
-          eventType: 'payment.card.declined',
-          occurredAt: FIXED_TIMESTAMP,
-          data: { authorization_id: 'iauth_002', amount: 5000, currency: 'USD' },
-        } satisfies ParsedWebhookEvent,
-      ]),
-  });
-  const restoreWriter = installEventWriterMock(server, {
-    writeEvent: (input) => {
-      writeEventCalls.push(input);
-      return Promise.resolve({
-        event: buildFakeCardEventRecord({ eventType: 'payment.card.declined' }),
-        wasCreated: true,
-      } as WriteEventResult);
-    },
-  });
-
-  try {
-    const response = await server.inject({
-      method: 'POST',
-      url: '/webhooks/stripe',
-      headers,
-      payload: bodyStr,
-    });
-
-    assert.strictEqual(response.statusCode, 200);
-    assert.strictEqual(writeEventCalls.length, 1);
-    const input = writeEventCalls[0] as Record<string, unknown>;
-    assert.strictEqual(input['eventType'], 'payment.card.declined');
-    assert.strictEqual(input['providerEventId'], 'evt_auth_002');
-  } finally {
-    systemDal.findResourceByProviderRef = originalFind;
-    restoreAdapter();
-    restoreWriter();
-    await server.close();
-  }
+		assert.strictEqual(response.statusCode, 403);
+	} finally {
+		restore();
+		await server.close();
+	}
 });
 
-void test('POST /webhooks/stripe: transaction → payment.card.settled', async () => {
-  const server = await buildServer();
-  const bodyStr = buildTransactionWebhookPayload();
-  const headers = buildStripeWebhookHeaders(bodyStr, STRIPE_TEST_SECRET);
-  const resource = buildCardResourceRecord();
-  const writeEventCalls: unknown[] = [];
+void test("POST /agents/:id/actions/create_card_details_session returns a short-lived Stripe session", async () => {
+	const server = await buildServer();
+	const { authorizationHeader, restore } = await installAuthApiKey(server, {
+		keyType: "root",
+	});
+	const agent = buildAgentRecord();
+	const resource = buildCardResourceRecord();
+	const restoreAgents = installAgentsDalMock({
+		findById: () => Promise.resolve(agent),
+	});
+	const restoreResources = installResourcesDalMock({
+		findById: () => Promise.resolve(resource),
+	});
+	const restoreAdapter = installStripeAdapterMock(server, {
+		createCardDetailsSession: () =>
+			Promise.resolve({
+				cardId: "ic_test123",
+				ephemeralKeySecret: "ephkey_test_secret",
+				expiresAt: 1_800_000_000,
+				livemode: false,
+				apiVersion: STRIPE_API_VERSION,
+			}),
+	});
 
-  const originalFind = systemDal.findResourceByProviderRef.bind(systemDal);
-  systemDal.findResourceByProviderRef = () => Promise.resolve(resource);
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/agents/agt_123/actions/create_card_details_session",
+			headers: { authorization: authorizationHeader },
+			payload: { resource_id: "res_card_123", nonce: "nonce_123" },
+		});
 
-  const restoreAdapter = installStripeAdapterMock(server, {
-    verifyWebhook: () => Promise.resolve(true),
-    parseWebhook: () =>
-      Promise.resolve([
-        {
-          resourceRef: 'ic_test123',
-          provider: 'stripe',
-          providerEventId: 'evt_txn_001',
-          eventType: 'payment.card.settled',
-          occurredAt: FIXED_TIMESTAMP,
-          data: {
-            transaction_id: 'ipi_001',
-            authorization_id: 'iauth_001',
-            amount: 5000,
-            currency: 'USD',
-          },
-        } satisfies ParsedWebhookEvent,
-      ]),
-  });
-  const restoreWriter = installEventWriterMock(server, {
-    writeEvent: (input) => {
-      writeEventCalls.push(input);
-      return Promise.resolve({
-        event: buildFakeCardEventRecord({ eventType: 'payment.card.settled' }),
-        wasCreated: true,
-      } as WriteEventResult);
-    },
-  });
-
-  try {
-    const response = await server.inject({
-      method: 'POST',
-      url: '/webhooks/stripe',
-      headers,
-      payload: bodyStr,
-    });
-
-    assert.strictEqual(response.statusCode, 200);
-    assert.strictEqual(writeEventCalls.length, 1);
-    const input = writeEventCalls[0] as Record<string, unknown>;
-    assert.strictEqual(input['eventType'], 'payment.card.settled');
-    assert.strictEqual(input['providerEventId'], 'evt_txn_001');
-    const data = input['data'] as Record<string, unknown>;
-    assert.strictEqual(data['transaction_id'], 'ipi_001');
-    assert.strictEqual(data['authorization_id'], 'iauth_001');
-  } finally {
-    systemDal.findResourceByProviderRef = originalFind;
-    restoreAdapter();
-    restoreWriter();
-    await server.close();
-  }
+		assert.strictEqual(response.statusCode, 200);
+		const payload = response.json<{
+			session: {
+				resource_id: string;
+				card_id: string;
+				ephemeral_key_secret: string;
+				expires_at: number;
+				stripe_api_version: string;
+			};
+		}>();
+		assert.strictEqual(payload.session.resource_id, "res_card_123");
+		assert.strictEqual(payload.session.card_id, "ic_test123");
+		assert.strictEqual(
+			payload.session.ephemeral_key_secret,
+			"ephkey_test_secret",
+		);
+		assert.strictEqual(payload.session.expires_at, 1_800_000_000);
+		assert.strictEqual(payload.session.stripe_api_version, STRIPE_API_VERSION);
+	} finally {
+		restore();
+		restoreAgents();
+		restoreResources();
+		restoreAdapter();
+		await server.close();
+	}
 });
 
-void test('POST /webhooks/stripe: unknown event type → 200, no event written', async () => {
-  const server = await buildServer();
-  const bodyStr = JSON.stringify({
-    id: 'evt_unknown',
-    type: 'customer.created',
-    created: 0,
-    data: { object: {} },
-  });
-  const headers = buildStripeWebhookHeaders(bodyStr, STRIPE_TEST_SECRET);
-  const writeEventCalls: unknown[] = [];
+void test("POST /agents/:id/actions/create_card_details_session returns 404 for a card owned by another agent", async () => {
+	const server = await buildServer();
+	const { authorizationHeader, restore } = await installAuthApiKey(server, {
+		keyType: "root",
+	});
+	const agent = buildAgentRecord();
+	const otherAgentResource = buildCardResourceRecord({ agentId: "agt_other" });
+	const restoreAgents = installAgentsDalMock({
+		findById: () => Promise.resolve(agent),
+	});
+	const restoreResources = installResourcesDalMock({
+		findById: () => Promise.resolve(otherAgentResource),
+	});
 
-  const restoreAdapter = installStripeAdapterMock(server, {
-    verifyWebhook: () => Promise.resolve(true),
-    parseWebhook: () => Promise.resolve([]),
-  });
-  const restoreWriter = installEventWriterMock(server, {
-    writeEvent: (input) => {
-      writeEventCalls.push(input);
-      return Promise.resolve({
-        event: buildFakeCardEventRecord(),
-        wasCreated: true,
-      } as WriteEventResult);
-    },
-  });
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/agents/agt_123/actions/create_card_details_session",
+			headers: { authorization: authorizationHeader },
+			payload: { resource_id: otherAgentResource.id, nonce: "nonce_123" },
+		});
 
-  try {
-    const response = await server.inject({
-      method: 'POST',
-      url: '/webhooks/stripe',
-      headers,
-      payload: bodyStr,
-    });
+		assert.strictEqual(response.statusCode, 404);
+		assert.deepStrictEqual(response.json(), {
+			message: "Card resource not found",
+		});
+	} finally {
+		restore();
+		restoreAgents();
+		restoreResources();
+		await server.close();
+	}
+});
 
-    assert.strictEqual(response.statusCode, 200);
-    assert.strictEqual(writeEventCalls.length, 0);
-  } finally {
-    restoreAdapter();
-    restoreWriter();
-    await server.close();
-  }
+void test("issueCardBodySchema accepts Stripe spending-limit categories and intervals", () => {
+	const parsed = issueCardBodySchema.parse(
+		buildIssueCardPayload({
+			spending_limits: [
+				{
+					amount: 5000,
+					categories: ["advertising_services"],
+					interval: "all_time",
+				},
+			],
+			blocked_categories: ["art_dealers_and_galleries"],
+			allowed_merchant_countries: ["us"],
+		}),
+	);
+
+	assert.deepStrictEqual(parsed.spending_limits, [
+		{
+			amount: 5000,
+			categories: ["advertising_services"],
+			interval: "all_time",
+		},
+	]);
+	assert.deepStrictEqual(parsed.blocked_categories, [
+		"art_dealers_and_galleries",
+	]);
+	assert.deepStrictEqual(parsed.allowed_merchant_countries, ["US"]);
+});
+
+void test("StripeAdapter pins the Stripe API version and maps documented cardholder + spending-control fields", async () => {
+	const adapter = new StripeAdapter("sk_test_123", "whsec_test_123");
+	const stripeClient = (
+		adapter as unknown as {
+			stripe: Stripe & { getApiField(field: string): string | null };
+		}
+	).stripe;
+	assert.strictEqual(stripeClient.getApiField("version"), STRIPE_API_VERSION);
+
+	let cardholderCreateParams: Stripe.Issuing.CardholderCreateParams | undefined;
+	let cardCreateParams: Stripe.Issuing.CardCreateParams | undefined;
+
+	(
+		adapter as unknown as {
+			stripe: {
+				issuing: {
+					cardholders: {
+						create: (
+							params: Stripe.Issuing.CardholderCreateParams,
+						) => Promise<{ id: string }>;
+						update: (
+							id: string,
+							params: { status: "inactive" },
+						) => Promise<void>;
+					};
+					cards: {
+						create: (
+							params: Stripe.Issuing.CardCreateParams,
+						) => Promise<
+							Pick<
+								Stripe.Issuing.Card,
+								"id" | "last4" | "exp_month" | "exp_year"
+							>
+						>;
+					};
+				};
+			};
+		}
+	).stripe = {
+		issuing: {
+			cardholders: {
+				create: (params) => {
+					cardholderCreateParams = params;
+					return Promise.resolve({ id: "ich_test_123" });
+				},
+				update: () => Promise.resolve(),
+			},
+			cards: {
+				create: (params) => {
+					cardCreateParams = params;
+					return Promise.resolve({
+						id: "ic_test_123",
+						last4: "4242",
+						exp_month: 12,
+						exp_year: 2027,
+					});
+				},
+			},
+		},
+	};
+
+	const result = await adapter.provision("agt_123", {
+		cardholder_name: "Agent Tester",
+		billing_address: {
+			line1: "123 Market St",
+			line2: "Suite 10",
+			city: "San Francisco",
+			state: "CA",
+			postal_code: "94105",
+			country: "US",
+		},
+		currency: "usd",
+		spending_limits: [
+			{
+				amount: 5000,
+				categories: ["advertising_services"],
+				interval: "all_time",
+			},
+		],
+		allowed_categories: ["bakeries"],
+		blocked_merchant_countries: ["CA"],
+	});
+
+	assert.deepStrictEqual(cardholderCreateParams, {
+		name: "Agent Tester",
+		type: "individual",
+		billing: {
+			address: {
+				line1: "123 Market St",
+				line2: "Suite 10",
+				city: "San Francisco",
+				state: "CA",
+				postal_code: "94105",
+				country: "US",
+			},
+		},
+	});
+	assert.deepStrictEqual(cardCreateParams, {
+		cardholder: "ich_test_123",
+		type: "virtual",
+		currency: "usd",
+		status: "active",
+		spending_controls: {
+			spending_limits: [
+				{
+					amount: 5000,
+					categories: ["advertising_services"],
+					interval: "all_time",
+				},
+			],
+			allowed_categories: ["bakeries"],
+			blocked_merchant_countries: ["CA"],
+		},
+	});
+	assert.deepStrictEqual(result, {
+		providerRef: "ic_test_123",
+		config: {
+			cardholder_id: "ich_test_123",
+			last4: "4242",
+			exp_month: 12,
+			exp_year: 2027,
+			currency: "usd",
+		},
+	});
+});
+
+void test("StripeAdapter.provision deactivates the cardholder when card creation fails", async () => {
+	const adapter = new StripeAdapter("sk_test_123", "whsec_test_123");
+	const deactivatedCardholders: string[] = [];
+
+	(
+		adapter as unknown as {
+			stripe: {
+				issuing: {
+					cardholders: {
+						create: (
+							params: Stripe.Issuing.CardholderCreateParams,
+						) => Promise<{ id: string }>;
+						update: (
+							id: string,
+							params: { status: "inactive" },
+						) => Promise<void>;
+					};
+					cards: {
+						create: (params: Stripe.Issuing.CardCreateParams) => Promise<never>;
+					};
+				};
+			};
+		}
+	).stripe = {
+		issuing: {
+			cardholders: {
+				create: () => Promise.resolve({ id: "ich_fail_123" }),
+				update: (id) => {
+					deactivatedCardholders.push(id);
+					return Promise.resolve();
+				},
+			},
+			cards: {
+				create: () => Promise.reject(new Error("card create failed")),
+			},
+		},
+	};
+
+	await assert.rejects(
+		adapter.provision("agt_123", buildIssueCardPayload()),
+		/card create failed/,
+	);
+	assert.deepStrictEqual(deactivatedCardholders, ["ich_fail_123"]);
+});
+
+void test("StripeAdapter.createCardDetailsSession uses the nonce and pinned API version", async () => {
+	const adapter = new StripeAdapter("sk_test_123", "whsec_test_123");
+	let ephemeralKeyParams: Stripe.EphemeralKeyCreateParams | undefined;
+	let ephemeralKeyOptions: Stripe.RequestOptions | undefined;
+
+	(
+		adapter as unknown as {
+			stripe: {
+				ephemeralKeys: {
+					create: (
+						params: Stripe.EphemeralKeyCreateParams,
+						options?: Stripe.RequestOptions,
+					) => Promise<{ secret?: string; expires: number; livemode: boolean }>;
+				};
+			};
+		}
+	).stripe = {
+		ephemeralKeys: {
+			create: (params, options) => {
+				ephemeralKeyParams = params;
+				ephemeralKeyOptions = options;
+				return Promise.resolve({
+					secret: "ephkey_test_secret",
+					expires: 1_800_000_000,
+					livemode: false,
+				});
+			},
+		},
+	};
+
+	const session = await adapter.createCardDetailsSession(
+		buildCardResourceRecord(),
+		"nonce_123",
+	);
+
+	assert.deepStrictEqual(ephemeralKeyParams, {
+		issuing_card: "ic_test123",
+		nonce: "nonce_123",
+	});
+	assert.deepStrictEqual(ephemeralKeyOptions, {
+		apiVersion: STRIPE_API_VERSION,
+	});
+	assert.deepStrictEqual(session, {
+		cardId: "ic_test123",
+		ephemeralKeySecret: "ephkey_test_secret",
+		expiresAt: 1_800_000_000,
+		livemode: false,
+		apiVersion: STRIPE_API_VERSION,
+	});
+});
+
+void test("ResourceManager.provision deprovisions a Stripe card when DB activation fails", async () => {
+	const fakeAdapter: ProviderAdapter = {
+		providerName: "stripe",
+		provision: () =>
+			Promise.resolve({
+				providerRef: "ic_test123",
+				config: {
+					cardholder_id: "ich_test123",
+					last4: "4242",
+					exp_month: 12,
+					exp_year: 2027,
+					currency: "usd",
+				},
+			}),
+		deprovision: () => Promise.resolve({}),
+		performAction: () => Promise.resolve({}),
+		verifyWebhook: () => Promise.resolve(true),
+		parseWebhook: () => Promise.resolve([]),
+	};
+
+	let deprovisionCalls = 0;
+	fakeAdapter.deprovision = () => {
+		deprovisionCalls += 1;
+		return Promise.resolve({});
+	};
+
+	const fakeDal = {
+		resources: {
+			findById: () => Promise.resolve(null),
+			insert: () =>
+				Promise.resolve(
+					buildCardResourceRecord({
+						id: "res_card_123",
+						state: "provisioning",
+						providerRef: null,
+						config: buildIssueCardPayload(),
+					}),
+				),
+			updateById: () =>
+				Promise.reject(new Error("forced resource activation failure")),
+		},
+	} as unknown as DalFactory;
+
+	const manager = new ResourceManager(new Map([["stripe", fakeAdapter]]));
+	await assert.rejects(
+		manager.provision(
+			fakeDal,
+			"agt_123",
+			"card",
+			"stripe",
+			buildIssueCardPayload(),
+		),
+		/forced resource activation failure/,
+	);
+	assert.strictEqual(deprovisionCalls, 1);
+});
+
+void test("StripeAdapter.parseWebhook preserves refund sign and transaction metadata", async () => {
+	const adapter = new StripeAdapter("sk_test_123", "whsec_test_123");
+	const payload = JSON.stringify({
+		id: "evt_txn_refund_123",
+		type: "issuing_transaction.created",
+		created: Math.floor(FIXED_TIMESTAMP.getTime() / 1000),
+		data: {
+			object: {
+				id: "ipi_refund_123",
+				card: "ic_test123",
+				amount: -2500,
+				currency: "usd",
+				authorization: "iauth_123",
+				type: "refund",
+			},
+		},
+	});
+
+	const [event] = await adapter.parseWebhook(
+		Buffer.from(payload),
+		buildStripeWebhookHeaders(payload, "whsec_test_123"),
+	);
+
+	assert.deepStrictEqual(event, {
+		resourceRef: "ic_test123",
+		provider: "stripe",
+		providerEventId: "evt_txn_refund_123",
+		eventType: EVENT_TYPES.PAYMENT_CARD_SETTLED,
+		occurredAt: FIXED_TIMESTAMP,
+		data: {
+			transaction_id: "ipi_refund_123",
+			authorization_id: "iauth_123",
+			amount: -2500,
+			currency: "USD",
+			transaction_type: "refund",
+		},
+	});
+});
+
+void test("StripeAdapter.parseWebhook emits payment.card.declined for issuing_authorization.created with approved:false", async () => {
+	const adapter = new StripeAdapter("sk_test_123", "whsec_test_123");
+	const payload = JSON.stringify({
+		id: "evt_declined_123",
+		type: "issuing_authorization.created",
+		created: Math.floor(FIXED_TIMESTAMP.getTime() / 1000),
+		data: {
+			object: {
+				id: "iauth_declined_123",
+				card: "ic_test123",
+				amount: 1500,
+				currency: "usd",
+				approved: false,
+			},
+		},
+	});
+
+	const [event] = await adapter.parseWebhook(
+		Buffer.from(payload),
+		buildStripeWebhookHeaders(payload, "whsec_test_123"),
+	);
+
+	assert.strictEqual(event.eventType, EVENT_TYPES.PAYMENT_CARD_DECLINED);
+	assert.deepStrictEqual(event, {
+		resourceRef: "ic_test123",
+		provider: "stripe",
+		providerEventId: "evt_declined_123",
+		eventType: EVENT_TYPES.PAYMENT_CARD_DECLINED,
+		occurredAt: FIXED_TIMESTAMP,
+		data: {
+			authorization_id: "iauth_declined_123",
+			amount: 1500,
+			currency: "USD",
+		},
+	});
+});
+
+void test("POST /agents/:id/actions/issue_card response does not contain PAN or CVC fields", async () => {
+	const server = await buildServer();
+	const { authorizationHeader, restore } = await installAuthApiKey(server);
+	const agent = buildAgentRecord();
+	const resource = buildCardResourceRecord({
+		config: {
+			cardholder_id: "ich_test",
+			last4: "4242",
+			exp_month: 12,
+			exp_year: 2027,
+			currency: "usd",
+		},
+	});
+	const event = buildEventRecord({
+		eventType: EVENT_TYPES.PAYMENT_CARD_ISSUED,
+		agentId: agent.id,
+		resourceId: resource.id,
+		provider: "stripe",
+		data: { card_id: "ic_test123" },
+	});
+	const restoreAgents = installAgentsDalMock({
+		findById: () => Promise.resolve(agent),
+	});
+	const restoreResources = installResourcesDalMock({
+		findById: () => Promise.resolve(null),
+	});
+	const restoreEvents = installEventsDalMock({
+		findByIdempotencyKey: () => Promise.resolve(null),
+	});
+	// Ensure stripeAdapter is present so the route does not short-circuit with 500
+	const restoreAdapter = installStripeAdapterMock(server, {});
+	const restoreManager = installResourceManagerMock(server, {
+		provision: () =>
+			Promise.resolve({
+				resource,
+				reusedExisting: false,
+			}),
+	});
+	const restoreWriter = installEventWriterMock(server, {
+		writeEvent: () => Promise.resolve({ event, wasCreated: true }),
+	});
+
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: `/agents/${agent.id}/actions/issue_card`,
+			headers: { authorization: authorizationHeader },
+			payload: buildIssueCardPayload(),
+		});
+
+		assert.strictEqual(response.statusCode, 200);
+		const body = response.json<{
+			card: Record<string, unknown>;
+		}>();
+		assert.strictEqual(body.card.number, undefined);
+		assert.strictEqual(body.card.cvc, undefined);
+		assert.strictEqual(body.card.last4, "4242");
+		assert.strictEqual(body.card.exp_month, 12);
+		assert.strictEqual(body.card.exp_year, 2027);
+	} finally {
+		restore();
+		restoreAgents();
+		restoreResources();
+		restoreEvents();
+		restoreAdapter();
+		restoreManager();
+		restoreWriter();
+		await server.close();
+	}
+});
+
+void test("POST /webhooks/stripe returns 401 for invalid signatures", async () => {
+	const server = await buildServer();
+	const restoreAdapter = installStripeAdapterMock(server, {
+		verifyWebhook: () => Promise.resolve(false),
+	});
+
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/webhooks/stripe",
+			headers: { "content-type": "application/json" },
+			payload: "{}",
+		});
+
+		assert.strictEqual(response.statusCode, 401);
+	} finally {
+		restoreAdapter();
+		await server.close();
+	}
+});
+
+void test("POST /webhooks/stripe returns 200 when a verified webhook cannot be matched to a card resource", async () => {
+	const server = await buildServer();
+	const body = JSON.stringify({ id: "evt_missing_resource" });
+	const originalFind = systemDal.findResourceByProviderRef.bind(systemDal);
+	let writeEventCalls = 0;
+
+	systemDal.findResourceByProviderRef = () => Promise.resolve(null);
+	const restoreAdapter = installStripeAdapterMock(server, {
+		verifyWebhook: () => Promise.resolve(true),
+		parseWebhook: () =>
+			Promise.resolve([
+				{
+					resourceRef: "ic_missing_123",
+					provider: "stripe",
+					providerEventId: "evt_missing_resource",
+					eventType: EVENT_TYPES.PAYMENT_CARD_AUTHORIZED,
+					occurredAt: FIXED_TIMESTAMP,
+					data: {
+						authorization_id: "iauth_missing_123",
+						amount: 5000,
+						currency: "USD",
+					},
+				} satisfies ParsedWebhookEvent,
+			]),
+	});
+	const restoreWriter = installEventWriterMock(server, {
+		writeEvent: () => {
+			writeEventCalls += 1;
+			return Promise.reject(
+				new Error("writeEvent should not be called for unmatched webhooks"),
+			);
+		},
+	});
+
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/webhooks/stripe",
+			headers: buildStripeWebhookHeaders(body, "whsec_test_123"),
+			payload: body,
+		});
+
+		assert.strictEqual(response.statusCode, 200);
+		assert.deepStrictEqual(response.json(), { ok: true });
+		assert.strictEqual(writeEventCalls, 0);
+	} finally {
+		systemDal.findResourceByProviderRef = originalFind;
+		restoreAdapter();
+		restoreWriter();
+		await server.close();
+	}
+});
+
+void test("POST /webhooks/stripe returns 500 when persistence fails after verification", async () => {
+	const server = await buildServer();
+	const body = JSON.stringify({ id: "evt_write_failure_123" });
+	const resource = buildCardResourceRecord();
+	const originalFind = systemDal.findResourceByProviderRef.bind(systemDal);
+
+	systemDal.findResourceByProviderRef = () => Promise.resolve(resource);
+	const restoreAdapter = installStripeAdapterMock(server, {
+		verifyWebhook: () => Promise.resolve(true),
+		parseWebhook: () =>
+			Promise.resolve([
+				{
+					resourceRef: "ic_test123",
+					provider: "stripe",
+					providerEventId: "evt_write_failure_123",
+					eventType: EVENT_TYPES.PAYMENT_CARD_AUTHORIZED,
+					occurredAt: FIXED_TIMESTAMP,
+					data: {
+						authorization_id: "iauth_write_failure_123",
+						amount: 5000,
+						currency: "USD",
+					},
+				} satisfies ParsedWebhookEvent,
+			]),
+	});
+	const restoreWriter = installEventWriterMock(server, {
+		writeEvent: () => Promise.reject(new Error("forced webhook write failure")),
+	});
+
+	try {
+		const response = await server.inject({
+			method: "POST",
+			url: "/webhooks/stripe",
+			headers: buildStripeWebhookHeaders(body, "whsec_test_123"),
+			payload: body,
+		});
+
+		assert.strictEqual(response.statusCode, 500);
+		assert.deepStrictEqual(response.json(), {
+			message: "Webhook processing failed",
+		});
+	} finally {
+		systemDal.findResourceByProviderRef = originalFind;
+		restoreAdapter();
+		restoreWriter();
+		await server.close();
+	}
 });

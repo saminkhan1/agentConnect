@@ -19,10 +19,12 @@ AgentConnect aims to be the neutral, multi-rail **"agent infrastructure"** layer
 ## 🚀 Features
 
 - **Unified Agent Identity:** Map all current capabilities (cards, emails) and future ones (numbers, wallets) to canonical `agent_id`s.
-- **Real-time Event Log:** A canonical, paginated timeline of all agent activities and webhooks.
-- **Email Integration:** Send and receive emails natively (powered by AgentMail & Svix webhooks).
-- **Virtual Cards:** Issue agent-scoped virtual cards (powered by Stripe Issuing) with robust spending limits.
-- **MCP Integration:** Expose capabilities directly via the Model Context Protocol (MCP) so agents can discover and call tools securely.
+- **Root and Service API Keys:** Bootstrap an org with a root key, mint service keys for day-to-day automation, and rotate or revoke root keys without downtime.
+- **Real-time Event Log and Timeline:** A canonical, paginated timeline of agent activity plus derived email and card groupings.
+- **Email Integration:** Provision inboxes, send and reply through AgentMail, and require explicit `idempotency_key` values for safe retries.
+- **Virtual Cards and Billing:** Issue agent-scoped virtual cards with Stripe Issuing and manage subscription checkout and billing portal flows.
+- **Outbound Webhook Delivery:** Fan out canonical events or bounded OpenClaw hook payloads with retry policy, delivery logs, and signed metadata headers.
+- **MCP Integration:** Expose capabilities over stdio and optional HTTP/SSE so agents can discover and call tools securely. Payment tools are advertised only when Stripe is configured.
 - **Multi-tenant:** Built from the ground up to support multiple organizations with strict data isolation.
 
 ---
@@ -66,14 +68,23 @@ AgentConnect aims to be the neutral, multi-rail **"agent infrastructure"** layer
    docker-compose up -d     # Start Postgres 16 on localhost:5432
    ```
 
-4. **Environment Variables:**
-   Copy the example environment file and configure your credentials.
+4. **Create `.env`:**
+   This repo does not ship a checked-in `.env.example`, so create `.env` yourself and set the variables you need.
 
-   ```bash
-   cp .env.example .env
-   ```
+   Required for common flows:
 
-   _(Ensure you set up your database URL, Stripe keys, and AgentMail keys in `.env`)_
+   - `DATABASE_URL` (optional locally; defaults to `postgresql://postgres:password@localhost:5432/agentconnect_dev`)
+   - `AGENTMAIL_API_KEY`
+   - `AGENTMAIL_WEBHOOK_SECRET`
+   - `STRIPE_SECRET_KEY`
+   - `STRIPE_WEBHOOK_SECRET`
+
+   Optional but commonly used:
+
+   - `MCP_HTTP_ENABLED=true` to expose `/mcp`
+   - `MCP_ALLOWED_ORIGINS=https://app.example.com` for MCP browser CORS
+   - `SIGNUP_SECRET` to enable subscription enforcement
+   - `STRIPE_BILLING_WEBHOOK_SECRET` plus `STRIPE_PRICE_ID_*` values for billing flows
 
 5. **Run database migrations:**
 
@@ -83,16 +94,50 @@ AgentConnect aims to be the neutral, multi-rail **"agent infrastructure"** layer
    ```
 
 6. **Start the development server:**
+
    ```bash
    source .env && pnpm run dev   # Start server — MUST source .env first; missing vars silently disable AgentMail adapter
    ```
+
    The API will be available at `http://localhost:3000`.
+
+7. **Run optional local sidecars:**
+
+   ```bash
+   pnpm run worker:webhooks  # Deliver outbound webhook retries
+   pnpm run mcp:stdio        # Start the MCP server over stdio
+   ```
+
+8. **Expose local webhook routes over Cloudflare Tunnel (optional):**
+   ```bash
+   pnpm run dev:webhooks
+   ```
+   This runs the free TryCloudflare flow for your current local `PORT` and prints a random public `trycloudflare.com` URL. See `docs/cloudflare-tunnel.md` for the full dev workflow.
+
+### Integration Guides
+
+- AgentMail email provider integration: `docs/agentmail-integration.md`
+- Local webhook tunneling: `docs/cloudflare-tunnel.md`
+- OpenClaw + Hermes production integration: `docs/openclaw-hermes-integration.md`
+
+### API Workflow Notes
+
+- `POST /orgs` returns a root key once. Use that root key to create service keys, rotate root keys, and revoke retired keys.
+- `POST /orgs/:id/api-keys/rotate-root` issues a new root key while the current root key stays active until you revoke it with `POST /orgs/:id/api-keys/:keyId/revoke`.
+- `POST /billing/checkout` and `POST /billing/portal` accept root keys only.
+- `POST /agents/:id/actions/send_email` and `POST /agents/:id/actions/reply_email` require a non-empty `idempotency_key`.
+- `GET /health` reports `webhookDeliveryBacklog` so operators can spot stuck outbound deliveries.
+- Payment MCP tools are omitted when Stripe is not configured; the rest of the MCP surface still works.
 
 ### Testing & Linting
 
-- **Run all verification checks (Lint + Types + Test - full pre-merge check):**
+- **Run all verification checks (Lint + Format + Types + Test):**
   ```bash
   pnpm run verify
+  ```
+- **Run typecheck only:**
+  ```bash
+  pnpm run typecheck
   ```
 - **Run Unit Tests:**
   ```bash
@@ -102,9 +147,13 @@ AgentConnect aims to be the neutral, multi-rail **"agent infrastructure"** layer
   ```bash
   pnpm run test:integration # Runs drizzle-kit migrate, then tests/*.integration.ts
   ```
-- **Auto-fix linting issues:**
+- **Run the live Stripe smoke test (real keys required):**
   ```bash
-  pnpm run fix              # eslint --fix + prettier --write
+  pnpm run test:stripe-live
+  ```
+- **Auto-fix formatting & linting issues:**
+  ```bash
+  pnpm run fix              # Powered by Biome
   ```
 
 ---

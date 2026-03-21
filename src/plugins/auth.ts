@@ -1,89 +1,174 @@
-import type { FastifyPluginCallback, FastifyReply, FastifyRequest } from 'fastify';
-import fp from 'fastify-plugin';
+import type {
+	FastifyPluginCallback,
+	FastifyReply,
+	FastifyRequest,
+} from "fastify";
+import fp from "fastify-plugin";
 
 import {
-  ApiScope,
-  getScopesForApiKeyType,
-  parseApiKeyFromAuthorizationHeader,
-  verifyApiKeySecret,
-} from '../domain/api-keys';
+	type ApiKeyType,
+	type ApiScope,
+	getScopesForApiKeyType,
+	parseApiKeyFromAuthorizationHeader,
+	verifyApiKeySecret,
+} from "../domain/api-keys";
+import type { SubscriptionStatus } from "../domain/billing";
 
 export type AuthContext = {
-  org_id: string;
-  key_id: string;
-  scopes: ApiScope[];
+	org_id: string;
+	key_id: string;
+	key_type: ApiKeyType;
+	scopes: ApiScope[];
 };
 
-declare module 'fastify' {
-  interface FastifyRequest {
-    auth: AuthContext | null;
-  }
+type AuthApiKeyRecord = {
+	id: string;
+	orgId: string;
+	keyType: ApiKeyType;
+	keyHash: string;
+	isRevoked: boolean;
+};
+
+type AuthApiKeyLookup = {
+	getApiKeyById(id: string): Promise<AuthApiKeyRecord | null>;
+};
+
+declare module "fastify" {
+	interface FastifyRequest {
+		auth: AuthContext | null;
+	}
 }
 
 function sendUnauthorized(reply: FastifyReply) {
-  return reply.code(401).send({ message: 'Unauthorized' });
+	return reply.code(401).send({ message: "Unauthorized" });
+}
+
+export async function resolveAuthContext(
+	apiKeys: AuthApiKeyLookup,
+	authorizationHeader: string,
+): Promise<AuthContext | null> {
+	const parsedApiKey = parseApiKeyFromAuthorizationHeader(authorizationHeader);
+	if (!parsedApiKey) {
+		return null;
+	}
+
+	const apiKey = await apiKeys.getApiKeyById(parsedApiKey.keyId);
+	if (!apiKey || apiKey.isRevoked) {
+		return null;
+	}
+
+	const isValidSecret = await verifyApiKeySecret(
+		parsedApiKey.secret,
+		apiKey.keyHash,
+	);
+	if (!isValidSecret) {
+		return null;
+	}
+
+	return {
+		org_id: apiKey.orgId,
+		key_id: apiKey.id,
+		key_type: apiKey.keyType,
+		scopes: getScopesForApiKeyType(apiKey.keyType),
+	};
 }
 
 export function requireScope(...requiredScopes: ApiScope[]) {
-  return async (request: FastifyRequest, reply: FastifyReply) => {
-    const auth = request.auth;
-    if (!auth) {
-      return reply.code(401).send({ message: 'Unauthorized' });
-    }
+	return async (request: FastifyRequest, reply: FastifyReply) => {
+		const auth = request.auth;
+		if (!auth) {
+			return reply.code(401).send({ message: "Unauthorized" });
+		}
 
-    const grantedScopes = new Set(auth.scopes);
-    const hasRequiredScopes = requiredScopes.every((scope) => grantedScopes.has(scope));
-    if (!hasRequiredScopes) {
-      return reply.code(403).send({ message: 'Forbidden' });
-    }
-  };
+		const grantedScopes = new Set(auth.scopes);
+		const hasRequiredScopes = requiredScopes.every((scope) =>
+			grantedScopes.has(scope),
+		);
+		if (!hasRequiredScopes) {
+			return reply.code(403).send({ message: "Forbidden" });
+		}
+	};
+}
+
+const ACTIVE_SUBSCRIPTION_STATUSES: Set<SubscriptionStatus> = new Set([
+	"active",
+	"trialing",
+]);
+
+export function requireActiveSubscription() {
+	return async (request: FastifyRequest, reply: FastifyReply) => {
+		const auth = request.auth;
+		if (!auth) {
+			return reply.code(401).send({ message: "Unauthorized" });
+		}
+
+		const org = await request.server.systemDal.getOrg(auth.org_id);
+		if (!org) {
+			return reply.code(401).send({ message: "Unauthorized" });
+		}
+
+		if (
+			!ACTIVE_SUBSCRIPTION_STATUSES.has(
+				org.subscriptionStatus as SubscriptionStatus,
+			)
+		) {
+			return reply.code(402).send({
+				message:
+					"Active subscription required. Visit /billing/checkout to subscribe.",
+			});
+		}
+	};
+}
+
+export function requireKeyType(...requiredKeyTypes: ApiKeyType[]) {
+	return async (request: FastifyRequest, reply: FastifyReply) => {
+		const auth = request.auth;
+		if (!auth) {
+			return reply.code(401).send({ message: "Unauthorized" });
+		}
+
+		if (!requiredKeyTypes.includes(auth.key_type)) {
+			return reply.code(403).send({ message: "Forbidden" });
+		}
+	};
 }
 
 const authPlugin: FastifyPluginCallback = (server, _opts, done) => {
-  server.decorateRequest('auth', null);
+	server.decorateRequest("auth", null);
 
-  server.addHook('onRequest', async (request, reply) => {
-    request.auth = null;
+	server.addHook("onRequest", async (request, reply) => {
+		request.auth = null;
 
-    const authorizationHeader = request.headers.authorization;
-    if (authorizationHeader === undefined) {
-      return;
-    }
+		const authorizationHeader = request.headers.authorization;
+		if (authorizationHeader === undefined) {
+			return;
+		}
 
-    if (Array.isArray(authorizationHeader)) {
-      return sendUnauthorized(reply);
-    }
+		if (Array.isArray(authorizationHeader)) {
+			return sendUnauthorized(reply);
+		}
 
-    const parsedApiKey = parseApiKeyFromAuthorizationHeader(authorizationHeader);
-    if (!parsedApiKey) {
-      return sendUnauthorized(reply);
-    }
+		const auth = await resolveAuthContext(
+			server.systemDal,
+			authorizationHeader,
+		);
+		if (!auth) {
+			return sendUnauthorized(reply);
+		}
 
-    const apiKey = await server.systemDal.getApiKeyById(parsedApiKey.keyId);
-    if (!apiKey) {
-      return sendUnauthorized(reply);
-    }
+		request.auth = auth;
 
-    if (apiKey.isRevoked) {
-      return sendUnauthorized(reply);
-    }
+		// Enrich request logs with org context for observability
+		request.log = request.log.child({
+			orgId: auth.org_id,
+			keyId: auth.key_id,
+		});
+	});
 
-    const isValidSecret = await verifyApiKeySecret(parsedApiKey.secret, apiKey.keyHash);
-    if (!isValidSecret) {
-      return sendUnauthorized(reply);
-    }
-
-    request.auth = {
-      org_id: apiKey.orgId,
-      key_id: apiKey.id,
-      scopes: getScopesForApiKeyType(apiKey.keyType),
-    };
-  });
-
-  done();
+	done();
 };
 
 export default fp(authPlugin, {
-  name: 'auth',
-  dependencies: ['db'],
+	name: "auth",
+	dependencies: ["db"],
 });
