@@ -3,6 +3,10 @@ import crypto from "node:crypto";
 import type { FastifyPluginCallbackZod } from "fastify-type-provider-zod";
 import { getServerConfig } from "../../config";
 import { generateApiKeyMaterial } from "../../domain/api-keys";
+import {
+	getConfiguredCheckoutPlanTiers,
+	type PlanTier,
+} from "../../domain/billing";
 import { requireKeyType, requireScope } from "../../plugins/auth";
 import { errorResponseSchema } from "../schemas/common";
 import {
@@ -15,6 +19,15 @@ import {
 	rotateRootKeyParamsSchema,
 	rotateRootKeyResponseSchema,
 } from "../schemas/orgs";
+
+function buildBillingCheckoutNextStepMessage(planTiers: PlanTier[]): string {
+	if (planTiers.length === 1) {
+		return `Use your API key to call POST /billing/checkout with plan_tier="${planTiers[0]}", success_url, and cancel_url to activate your subscription.`;
+	}
+
+	const supportedPlanTiers = planTiers.map((tier) => `"${tier}"`).join(", ");
+	return `Use your API key to call POST /billing/checkout with plan_tier set to one of ${supportedPlanTiers}, plus success_url and cancel_url, to activate your subscription.`;
+}
 
 const orgRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
 	const config = getServerConfig(process.env);
@@ -54,6 +67,9 @@ const orgRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
 					keyHash: rootKey.keyHash,
 				},
 			});
+			const checkoutPlanTiers = server.billingService
+				? getConfiguredCheckoutPlanTiers(config)
+				: [];
 
 			return reply.code(201).send({
 				org: {
@@ -68,12 +84,11 @@ const orgRoutes: FastifyPluginCallbackZod = (server, _opts, done) => {
 					key: rootKey.plaintextKey,
 					createdAt: result.apiKey.createdAt.toISOString(),
 				},
-				...(server.billingService
+				...(checkoutPlanTiers.length > 0
 					? {
 							nextStep: {
 								action: "POST /billing/checkout",
-								message:
-									"Use your API key to call POST /billing/checkout with a plan_tier, success_url, and cancel_url to activate your subscription.",
+								message: buildBillingCheckoutNextStepMessage(checkoutPlanTiers),
 							},
 						}
 					: {}),

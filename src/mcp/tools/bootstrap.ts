@@ -22,13 +22,29 @@ export function registerBootstrapTools(
 		{
 			description:
 				"Create a new organization and receive a root API key. This is the first step — use the returned key to authenticate all subsequent tool calls.",
-			inputSchema: { name: z.string().min(1).describe("Organization name") },
+			inputSchema: {
+				name: z.string().min(1).describe("Organization name"),
+				signup_secret: z
+					.string()
+					.min(1)
+					.optional()
+					.describe(
+						"Optional org-bootstrap secret for deployments that require x-signup-secret on POST /orgs.",
+					),
+			},
 		},
-		async ({ name }) => {
+		async ({ name, signup_secret }) => {
+			const headers: Record<string, string> = {
+				"content-type": "application/json",
+			};
+			if (signup_secret) {
+				headers["x-signup-secret"] = signup_secret;
+			}
+
 			const data = await injectOrThrow<OrgCreateResponse>(fastify, {
 				method: "POST",
 				url: "/orgs",
-				headers: { "content-type": "application/json" },
+				headers,
 				payload: JSON.stringify({ name }),
 			});
 			return {

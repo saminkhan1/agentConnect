@@ -746,6 +746,79 @@ void test("agentinfra.orgs.create returns root_key in structuredContent", async 
 	}
 });
 
+void test("agentinfra.orgs.create forwards signup_secret when signup gating is enabled", async () => {
+	const originalSignupSecret = process.env.SIGNUP_SECRET;
+	process.env.SIGNUP_SECRET = "test-beta-secret";
+
+	const server = await buildServer();
+	const originalCreate = server.systemDal.createOrgWithApiKey.bind(
+		server.systemDal,
+	);
+	server.systemDal.createOrgWithApiKey = (data) =>
+		Promise.resolve({
+			org: {
+				id: data.org.id,
+				name: data.org.name ?? "Test Org",
+				planTier: "starter" as const,
+				stripeCustomerId: null,
+				stripeSubscriptionId: null,
+				subscriptionStatus: "incomplete" as const,
+				currentPeriodEnd: null,
+				createdAt: FIXED_TIMESTAMP,
+			},
+			apiKey: {
+				id: data.apiKey.id,
+				orgId: data.org.id,
+				keyType: "root" as const,
+				keyHash: data.apiKey.keyHash,
+				isRevoked: false,
+				createdAt: FIXED_TIMESTAMP,
+			},
+		});
+
+	try {
+		const mcp = buildMcpServer(server, {
+			auth: null,
+			authorizationHeader: null,
+		});
+		const registeredTools = (
+			mcp as unknown as {
+				_registeredTools: Record<
+					string,
+					{ handler: (...args: unknown[]) => Promise<unknown> }
+				>;
+			}
+		)._registeredTools;
+		const createOrgTool = registeredTools["agentinfra.orgs.create"];
+		assert.ok(createOrgTool, "orgs.create should be registered");
+
+		await assert.rejects(
+			createOrgTool.handler({ name: "Test Org" }, {} as never),
+			/FORBIDDEN: Invalid signup secret/,
+		);
+
+		const result = (await createOrgTool.handler(
+			{
+				name: "Test Org",
+				signup_secret: "test-beta-secret",
+			},
+			{} as never,
+		)) as {
+			structuredContent: { root_key: string };
+		};
+
+		assert.ok(result.structuredContent.root_key.startsWith("sk_"));
+	} finally {
+		server.systemDal.createOrgWithApiKey = originalCreate;
+		await server.close();
+		if (originalSignupSecret === undefined) {
+			delete process.env.SIGNUP_SECRET;
+		} else {
+			process.env.SIGNUP_SECRET = originalSignupSecret;
+		}
+	}
+});
+
 // ---------------------------------------------------------------------------
 // GET /messages route tests
 // ---------------------------------------------------------------------------

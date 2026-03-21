@@ -143,6 +143,173 @@ void test("POST /orgs succeeds when correct SIGNUP_SECRET is provided", async ()
 	}
 });
 
+void test("POST /orgs omits billing nextStep when checkout pricing is not configured", async () => {
+	const originalStripeSecretKey = process.env.STRIPE_SECRET_KEY;
+	const originalStarterPriceId = process.env.STRIPE_PRICE_ID_STARTER;
+	const originalPersonalPriceId = process.env.STRIPE_PRICE_ID_PERSONAL;
+	const originalPowerPriceId = process.env.STRIPE_PRICE_ID_POWER;
+	const originalSignupSecret = process.env.SIGNUP_SECRET;
+	delete process.env.SIGNUP_SECRET;
+	process.env.STRIPE_SECRET_KEY = "sk_test_billing";
+	delete process.env.STRIPE_PRICE_ID_STARTER;
+	delete process.env.STRIPE_PRICE_ID_PERSONAL;
+	delete process.env.STRIPE_PRICE_ID_POWER;
+
+	try {
+		const server = await buildServer();
+		const originalCreate = server.systemDal.createOrgWithApiKey.bind(
+			server.systemDal,
+		);
+		server.systemDal.createOrgWithApiKey = (data) =>
+			Promise.resolve({
+				org: {
+					id: data.org.id,
+					name: data.org.name ?? "Test Org",
+					planTier: "starter" as const,
+					stripeCustomerId: null,
+					stripeSubscriptionId: null,
+					subscriptionStatus: "incomplete" as const,
+					currentPeriodEnd: null,
+					createdAt: FIXED_TIMESTAMP,
+				},
+				apiKey: {
+					id: data.apiKey.id,
+					orgId: data.org.id,
+					keyType: data.apiKey.keyType,
+					keyHash: data.apiKey.keyHash,
+					isRevoked: false,
+					createdAt: FIXED_TIMESTAMP,
+				},
+			});
+
+		try {
+			const response = await server.inject({
+				method: "POST",
+				url: "/orgs",
+				payload: { name: "Test Org" },
+			});
+			assert.equal(response.statusCode, 201);
+			assert.equal(response.json<{ nextStep?: unknown }>().nextStep, undefined);
+		} finally {
+			server.systemDal.createOrgWithApiKey = originalCreate;
+			await server.close();
+		}
+	} finally {
+		if (originalSignupSecret === undefined) {
+			delete process.env.SIGNUP_SECRET;
+		} else {
+			process.env.SIGNUP_SECRET = originalSignupSecret;
+		}
+		if (originalStripeSecretKey === undefined) {
+			delete process.env.STRIPE_SECRET_KEY;
+		} else {
+			process.env.STRIPE_SECRET_KEY = originalStripeSecretKey;
+		}
+		if (originalStarterPriceId === undefined) {
+			delete process.env.STRIPE_PRICE_ID_STARTER;
+		} else {
+			process.env.STRIPE_PRICE_ID_STARTER = originalStarterPriceId;
+		}
+		if (originalPersonalPriceId === undefined) {
+			delete process.env.STRIPE_PRICE_ID_PERSONAL;
+		} else {
+			process.env.STRIPE_PRICE_ID_PERSONAL = originalPersonalPriceId;
+		}
+		if (originalPowerPriceId === undefined) {
+			delete process.env.STRIPE_PRICE_ID_POWER;
+		} else {
+			process.env.STRIPE_PRICE_ID_POWER = originalPowerPriceId;
+		}
+	}
+});
+
+void test("POST /orgs advertises only configured checkout tiers", async () => {
+	const originalStripeSecretKey = process.env.STRIPE_SECRET_KEY;
+	const originalStarterPriceId = process.env.STRIPE_PRICE_ID_STARTER;
+	const originalPersonalPriceId = process.env.STRIPE_PRICE_ID_PERSONAL;
+	const originalPowerPriceId = process.env.STRIPE_PRICE_ID_POWER;
+	const originalSignupSecret = process.env.SIGNUP_SECRET;
+	delete process.env.SIGNUP_SECRET;
+	process.env.STRIPE_SECRET_KEY = "sk_test_billing";
+	delete process.env.STRIPE_PRICE_ID_STARTER;
+	process.env.STRIPE_PRICE_ID_PERSONAL = "price_personal";
+	delete process.env.STRIPE_PRICE_ID_POWER;
+
+	try {
+		const server = await buildServer();
+		const originalCreate = server.systemDal.createOrgWithApiKey.bind(
+			server.systemDal,
+		);
+		server.systemDal.createOrgWithApiKey = (data) =>
+			Promise.resolve({
+				org: {
+					id: data.org.id,
+					name: data.org.name ?? "Test Org",
+					planTier: "starter" as const,
+					stripeCustomerId: null,
+					stripeSubscriptionId: null,
+					subscriptionStatus: "incomplete" as const,
+					currentPeriodEnd: null,
+					createdAt: FIXED_TIMESTAMP,
+				},
+				apiKey: {
+					id: data.apiKey.id,
+					orgId: data.org.id,
+					keyType: data.apiKey.keyType,
+					keyHash: data.apiKey.keyHash,
+					isRevoked: false,
+					createdAt: FIXED_TIMESTAMP,
+				},
+			});
+
+		try {
+			const response = await server.inject({
+				method: "POST",
+				url: "/orgs",
+				payload: { name: "Test Org" },
+			});
+			assert.equal(response.statusCode, 201);
+			const nextStep = response.json<{
+				nextStep?: { action: string; message: string };
+			}>().nextStep;
+			assert.ok(nextStep);
+			assert.equal(nextStep.action, "POST /billing/checkout");
+			assert.ok(nextStep.message.includes('plan_tier="personal"'));
+			assert.ok(!nextStep.message.includes('"starter"'));
+			assert.ok(!nextStep.message.includes('"power"'));
+		} finally {
+			server.systemDal.createOrgWithApiKey = originalCreate;
+			await server.close();
+		}
+	} finally {
+		if (originalSignupSecret === undefined) {
+			delete process.env.SIGNUP_SECRET;
+		} else {
+			process.env.SIGNUP_SECRET = originalSignupSecret;
+		}
+		if (originalStripeSecretKey === undefined) {
+			delete process.env.STRIPE_SECRET_KEY;
+		} else {
+			process.env.STRIPE_SECRET_KEY = originalStripeSecretKey;
+		}
+		if (originalStarterPriceId === undefined) {
+			delete process.env.STRIPE_PRICE_ID_STARTER;
+		} else {
+			process.env.STRIPE_PRICE_ID_STARTER = originalStarterPriceId;
+		}
+		if (originalPersonalPriceId === undefined) {
+			delete process.env.STRIPE_PRICE_ID_PERSONAL;
+		} else {
+			process.env.STRIPE_PRICE_ID_PERSONAL = originalPersonalPriceId;
+		}
+		if (originalPowerPriceId === undefined) {
+			delete process.env.STRIPE_PRICE_ID_POWER;
+		} else {
+			process.env.STRIPE_PRICE_ID_POWER = originalPowerPriceId;
+		}
+	}
+});
+
 // --- Subscription enforcement ---
 
 void test("Subscription enforcement returns 402 when subscription is inactive and SIGNUP_SECRET is set", async () => {

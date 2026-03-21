@@ -14,9 +14,35 @@ export type SubscriptionStatus =
 	| "unpaid";
 
 const PLAN_TIERS: PlanTier[] = ["starter", "personal", "power"];
+type BillingPricingConfig = Pick<
+	ServerConfig,
+	| "STRIPE_PRICE_ID_STARTER"
+	| "STRIPE_PRICE_ID_PERSONAL"
+	| "STRIPE_PRICE_ID_POWER"
+>;
 
 export function isValidPlanTier(tier: string): tier is PlanTier {
 	return PLAN_TIERS.includes(tier as PlanTier);
+}
+
+function getPriceIdFromConfig(
+	config: BillingPricingConfig,
+	tier: PlanTier,
+): string | undefined {
+	switch (tier) {
+		case "starter":
+			return config.STRIPE_PRICE_ID_STARTER;
+		case "personal":
+			return config.STRIPE_PRICE_ID_PERSONAL;
+		case "power":
+			return config.STRIPE_PRICE_ID_POWER;
+	}
+}
+
+export function getConfiguredCheckoutPlanTiers(
+	config: BillingPricingConfig,
+): PlanTier[] {
+	return PLAN_TIERS.filter((tier) => getPriceIdFromConfig(config, tier));
 }
 
 export function createBillingService(config: ServerConfig) {
@@ -27,14 +53,7 @@ export function createBillingService(config: ServerConfig) {
 	const stripe = new Stripe(stripeKey);
 
 	function getPriceId(tier: PlanTier): string | undefined {
-		switch (tier) {
-			case "starter":
-				return config.STRIPE_PRICE_ID_STARTER;
-			case "personal":
-				return config.STRIPE_PRICE_ID_PERSONAL;
-			case "power":
-				return config.STRIPE_PRICE_ID_POWER;
-		}
+		return getPriceIdFromConfig(config, tier);
 	}
 
 	async function getOrCreateStripeCustomer(
