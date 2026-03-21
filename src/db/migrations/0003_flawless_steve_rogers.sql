@@ -1,1 +1,0 @@
-CREATE INDEX "outbound_actions_org_state_idx" ON "outbound_actions" USING btree ("org_id","state");
