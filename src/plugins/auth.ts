@@ -157,6 +157,12 @@ const authPlugin: FastifyPluginCallback = (server, _opts, done) => {
 		}
 
 		request.auth = auth;
+
+		// Enrich request logs with org context for observability
+		request.log = request.log.child({
+			orgId: auth.org_id,
+			keyId: auth.key_id,
+		});
 	});
 
 	done();

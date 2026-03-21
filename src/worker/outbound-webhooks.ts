@@ -18,12 +18,25 @@ async function run() {
 
 	ensureDbIsReady();
 
-	for (;;) {
+	let shuttingDown = false;
+
+	const shutdown = async (signal: string) => {
+		console.log(`Received ${signal}, finishing current work...`);
+		shuttingDown = true;
+	};
+
+	process.on("SIGTERM", () => shutdown("SIGTERM"));
+	process.on("SIGINT", () => shutdown("SIGINT"));
+
+	while (!shuttingDown) {
 		const processedCount = await worker.drainOnce();
 		if (processedCount === 0) {
 			await sleep(config.OUTBOUND_WEBHOOK_WORKER_POLL_MS);
 		}
 	}
+
+	console.log("Worker shutdown complete");
+	await closeDbPool().catch(() => {});
 }
 
 if (require.main === module) {
