@@ -2,8 +2,8 @@
 
 AgentConnect is a TypeScript/Fastify control plane for agent-scoped identity,
 event logs, webhooks, MCP tools, AgentMail inboxes, and Stripe Issuing cards.
-It maps each capability to a canonical `agent_id` so agent workflows can share
-policy, observability, and audit history across providers.
+It maps external capabilities to canonical `agent_id`s so agent workflows get a
+shared policy, observability, and audit layer across providers.
 
 ## Why AgentConnect?
 
