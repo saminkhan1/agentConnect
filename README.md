@@ -1,8 +1,11 @@
 # AgentConnect
 
-A unified control plane and event log that maps real-world capabilities (email, card payments, and later SMS/voice/wallets/x402) onto canonical `agent_id`s, providing safe tool/MCP access and a per-agent timeline.
+AgentConnect is a TypeScript/Fastify control plane for agent-scoped identity,
+event logs, webhooks, MCP tools, AgentMail inboxes, and Stripe Issuing cards.
+It maps each capability to a canonical `agent_id` so agent workflows can share
+policy, observability, and audit history across providers.
 
-## 🌟 Why AgentConnect?
+## Why AgentConnect?
 
 Email-for-agents (AgentMail), card-for-agents (AgentCard), and protocols like MCP and x402 are maturing, but they often exist as separate silos. Identity, policy, and unified observability across these rails are missing.
 
@@ -16,7 +19,7 @@ AgentConnect aims to be the neutral, multi-rail **"agent infrastructure"** layer
 
 ---
 
-## 🚀 Features
+## Features
 
 - **Unified Agent Identity:** Map all current capabilities (cards, emails) and future ones (numbers, wallets) to canonical `agent_id`s.
 - **Root and Service API Keys:** Bootstrap an org with a root key, mint service keys for day-to-day automation, and rotate or revoke root keys without downtime.
@@ -29,7 +32,7 @@ AgentConnect aims to be the neutral, multi-rail **"agent infrastructure"** layer
 
 ---
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 - **Runtime:** [Node.js](https://nodejs.org/) & [TypeScript](https://www.typescriptlang.org/)
 - **Framework:** [Fastify](https://fastify.dev/) for high-performance API routing
