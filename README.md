@@ -55,8 +55,8 @@ AgentConnect aims to be the neutral, multi-rail **"agent infrastructure"** layer
 1. **Clone the repository:**
 
    ```bash
-   git clone https://github.com/your-username/agentconnect.git
-   cd agentconnect
+   git clone https://github.com/saminkhan1/agent-infrastructure-control-plane.git
+   cd agent-infrastructure-control-plane
    ```
 
 2. **Install dependencies:**
